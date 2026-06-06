@@ -1,0 +1,16 @@
+# 2026 World Cup group seed -- TEMPLATE. Replace with the official final draw.
+# 48 teams, 12 groups (A-L) of 4. Top 2 of each group + 8 best 3rd-placed
+# teams advance to a Round of 32. Fill in real teams once confirmed.
+group,team
+A,Mexico
+A,TeamA2
+A,TeamA3
+A,TeamA4
+B,Canada
+B,TeamB2
+B,TeamB3
+B,TeamB4
+C,USA
+C,TeamC2
+C,TeamC3
+C,TeamC4
