@@ -47,6 +47,64 @@ def edge_bars(edge_df: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def bankroll_curve(ledger: pd.DataFrame) -> go.Figure:
+    """Bankroll over time for one backtest run."""
+    fig = go.Figure(go.Scatter(
+        x=list(range(1, len(ledger) + 1)),
+        y=ledger["bankroll"],
+        mode="lines+markers",
+        line=dict(color="#1f77b4"),
+        hovertemplate="Bet %{x}<br>Bankroll: $%{y:.2f}<extra></extra>",
+    ))
+    fig.add_hline(y=ledger["bankroll"].iloc[0] if len(ledger) > 0 else 1000,
+                  line_dash="dash", line_color="gray",
+                  annotation_text="starting bankroll")
+    fig.update_layout(title="Bankroll over time (Kelly staking)",
+                      xaxis_title="bet number", yaxis_title="bankroll ($)",
+                      height=380)
+    return fig
+
+
+def calibration_plot(
+    model_probs: "np.ndarray",
+    outcomes: "np.ndarray",
+    n_bins: int = 10,
+    title: str = "Calibration (reliability diagram)",
+) -> go.Figure:
+    """Reliability diagram: predicted probability bucket vs actual win rate.
+
+    Perfect calibration sits on the diagonal. Points above the line mean the
+    model is underconfident (actual rate > predicted); below = overconfident.
+    """
+    import numpy as np
+    bins = np.linspace(0, 1, n_bins + 1)
+    centers, actuals, counts = [], [], []
+    for lo, hi in zip(bins[:-1], bins[1:]):
+        mask = (model_probs >= lo) & (model_probs < hi)
+        if mask.sum() == 0:
+            continue
+        centers.append((lo + hi) / 2)
+        actuals.append(float(outcomes[mask].mean()))
+        counts.append(int(mask.sum()))
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines",
+                             line=dict(dash="dash", color="gray"),
+                             name="perfect calibration"))
+    fig.add_trace(go.Scatter(
+        x=centers, y=actuals, mode="lines+markers",
+        marker=dict(size=[max(6, c // 2) for c in counts], color="#2ca02c"),
+        text=[f"n={c}" for c in counts],
+        hovertemplate="predicted: %{x:.2f}<br>actual: %{y:.2f}<br>%{text}<extra></extra>",
+        name="model",
+    ))
+    fig.update_layout(title=title, xaxis_title="predicted probability",
+                      yaxis_title="actual win rate",
+                      xaxis=dict(range=[0, 1]), yaxis=dict(range=[0, 1]),
+                      height=420)
+    return fig
+
+
 def model_vs_market_scatter(edge_df: pd.DataFrame) -> go.Figure:
     fig = px.scatter(edge_df, x="market_prob", y="model_prob", text="outcome",
                      title="Model vs market-implied probability")

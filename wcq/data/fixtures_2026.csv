@@ -1,16 +1,53 @@
-# 2026 World Cup group seed -- TEMPLATE. Replace with the official final draw.
-# 48 teams, 12 groups (A-L) of 4. Top 2 of each group + 8 best 3rd-placed
-# teams advance to a Round of 32. Fill in real teams once confirmed.
+# 2026 FIFA World Cup groups — official draw, 5 Dec 2025, Washington D.C.
+# 48 teams, 12 groups (A–L) of 4. Top 2 per group + 8 best third-placed teams advance.
+# This file is a reference only. The authoritative source for the simulation is
+# GROUPS_2026 in src/models/tournament.py.
 group,team
 A,Mexico
-A,TeamA2
-A,TeamA3
-A,TeamA4
+A,South Africa
+A,South Korea
+A,Czechia
 B,Canada
-B,TeamB2
-B,TeamB3
-B,TeamB4
-C,USA
-C,TeamC2
-C,TeamC3
-C,TeamC4
+B,Bosnia-Herzegovina
+B,Qatar
+B,Switzerland
+C,Brazil
+C,Morocco
+C,Haiti
+C,Scotland
+D,United States
+D,Paraguay
+D,Australia
+D,Türkiye
+E,Germany
+E,Curaçao
+E,Côte d'Ivoire
+E,Ecuador
+F,Netherlands
+F,Japan
+F,Sweden
+F,Tunisia
+G,Belgium
+G,Egypt
+G,Iran
+G,New Zealand
+H,Spain
+H,Cabo Verde
+H,Saudi Arabia
+H,Uruguay
+I,France
+I,Senegal
+I,Iraq
+I,Norway
+J,Argentina
+J,Algeria
+J,Austria
+J,Jordan
+K,Portugal
+K,Congo DR
+K,Uzbekistan
+K,Colombia
+L,England
+L,Croatia
+L,Ghana
+L,Panama

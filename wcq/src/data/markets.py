@@ -15,10 +15,39 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import json
+import re
 import pandas as pd
 import requests
 
 import config
+
+# Matches "Will <team> win the [FIFA] World Cup[?]" — handles minor punctuation variations.
+_WINNER_PATTERN = re.compile(
+    r"will\s+(.+?)\s+win\s+the\s+\d{4}\s+(?:FIFA\s+)?World\s+Cup",
+    re.IGNORECASE,
+)
+
+
+def winner_probs(df: pd.DataFrame) -> dict[str, float]:
+    """Parse binary "Will X win the WC?" markets into {team: yes_price}.
+
+    Polymarket (and potentially Kalshi) represent each team as a separate
+    binary market with "Yes" and "No" outcomes.  This function:
+      1. Keeps only Yes/YES rows.
+      2. Extracts the team name from the market title via regex.
+      3. Returns a raw {team: yes_price} dict ready for implied_from_book().
+
+    The caller is responsible for de-vigging and matching team names to the
+    MC survival dict (see MARKET_TO_FIFA in src/models/tournament.py).
+    """
+    result: dict[str, float] = {}
+    for _, row in df.iterrows():
+        if str(row["outcome"]).lower() != "yes":
+            continue
+        m = _WINNER_PATTERN.search(str(row.get("market", "")))
+        if m:
+            result[m.group(1).strip()] = float(row["price"])
+    return result
 
 
 def fetch_polymarket(query: str = "World Cup", limit: int = 100) -> pd.DataFrame:
