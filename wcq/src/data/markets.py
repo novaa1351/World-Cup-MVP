@@ -1,17 +1,29 @@
 """Fetch live World Cup prediction-market data.
 
-Both endpoints are PUBLIC and read-only (no API key). If the network is blocked
-(e.g. a sandbox) or no WC markets exist yet, every function fails gracefully and
-returns an empty frame, so the dashboard never crashes. Swap in `mock_markets()`
-to develop the UI offline.
+Both endpoints are PUBLIC and read-only (no API key). If the network is
+blocked or no WC markets exist, every function fails gracefully and returns
+an empty frame so the dashboard never crashes.
 
 Sources verified June 2026:
   Polymarket Gamma : https://gamma-api.polymarket.com/markets
   Kalshi (public)  : https://external-api.kalshi.com/trade-api/v2/markets
+
+Data shapes
+-----------
+Polymarket  — one market per team: "Will X win the 2026 FIFA World Cup?"
+              Outcomes: Yes / No.  price = YES mid (already 0-1).
+              winner_probs() extracts {team: yes_price} for the edge tab.
+
+Kalshi      — KXWCROUND series: "Will X qualify for FIFA World Cup [Round]?"
+              Four round types: 26RO16→R16, 26QUAR→QF, 26SEMI→SF, 26FINAL→final.
+              API v2 uses yes_bid_dollars / yes_ask_dollars (0-1 range).
+              kalshi_survival_probs() builds a {team: {round: mid_price}} dict
+              that plugs directly into the SVI surface and edge comparison.
 """
 from __future__ import annotations
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import json
@@ -21,7 +33,25 @@ import requests
 
 import config
 
-# Matches "Will <team> win the [FIFA] World Cup[?]" — handles minor punctuation variations.
+# ---------------------------------------------------------------------------
+# Kalshi round-code → our ROUNDS labels
+# ---------------------------------------------------------------------------
+_KALSHI_ROUND_MAP: dict[str, str] = {
+    "26RO16":  "R16",
+    "26QUAR":  "QF",
+    "26SEMI":  "SF",
+    "26FINAL": "final",
+}
+
+# Regex to extract team name from Kalshi market titles:
+#   "Will <team> qualify for FIFA World Cup [Round]?"
+_KALSHI_TEAM_PATTERN = re.compile(
+    r"Will\s+(.+?)\s+qualify\s+for\s+(?:FIFA\s+)?World\s+Cup",
+    re.IGNORECASE,
+)
+
+# Regex to extract team name from Polymarket winner titles:
+#   "Will <team> win the 2026 FIFA World Cup?"
 _WINNER_PATTERN = re.compile(
     r"will\s+(.+?)\s+win\s+the\s+\d{4}\s+(?:FIFA\s+)?World\s+Cup",
     re.IGNORECASE,
@@ -29,16 +59,11 @@ _WINNER_PATTERN = re.compile(
 
 
 def winner_probs(df: pd.DataFrame) -> dict[str, float]:
-    """Parse binary "Will X win the WC?" markets into {team: yes_price}.
+    """Parse Polymarket binary "Will X win the WC?" markets → {team: yes_price}.
 
-    Polymarket (and potentially Kalshi) represent each team as a separate
-    binary market with "Yes" and "No" outcomes.  This function:
-      1. Keeps only Yes/YES rows.
-      2. Extracts the team name from the market title via regex.
-      3. Returns a raw {team: yes_price} dict ready for implied_from_book().
-
-    The caller is responsible for de-vigging and matching team names to the
-    MC survival dict (see MARKET_TO_FIFA in src/models/tournament.py).
+    Keeps only Yes/YES rows, extracts the team name from the market title, and
+    returns a raw dict ready for implied_from_book(). The caller maps names via
+    MARKET_TO_FIFA in src/models/tournament.py before looking up mc_survival.
     """
     result: dict[str, float] = {}
     for _, row in df.iterrows():
@@ -50,8 +75,30 @@ def winner_probs(df: pd.DataFrame) -> dict[str, float]:
     return result
 
 
+def kalshi_survival_probs(df: pd.DataFrame) -> dict[str, dict[str, float]]:
+    """Convert the Kalshi DataFrame into {team: {round: mid_price}}.
+
+    Only rows with platform=='kalshi' and a recognised round are included.
+    Mid-price = (bid + ask) / 2 — already in 0-1 range.
+    Round labels match config.ROUNDS: 'R16', 'QF', 'SF', 'final'.
+    """
+    result: dict[str, dict[str, float]] = {}
+    kalshi_rows = df[df["platform"] == "kalshi"] if "platform" in df.columns else df
+    for _, row in kalshi_rows.iterrows():
+        team = str(row.get("team", ""))
+        rnd = str(row.get("round", ""))
+        price = row.get("price")
+        if team and rnd and price is not None:
+            result.setdefault(team, {})[rnd] = float(price)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Fetchers
+# ---------------------------------------------------------------------------
+
 def fetch_polymarket(query: str = "World Cup", limit: int = 100) -> pd.DataFrame:
-    """Search Gamma markets by keyword. Returns outcome-level rows."""
+    """Search Polymarket Gamma markets by keyword. Returns outcome-level rows."""
     try:
         r = requests.get(
             f"{config.POLYMARKET_GAMMA}/markets",
@@ -60,7 +107,7 @@ def fetch_polymarket(query: str = "World Cup", limit: int = 100) -> pd.DataFrame
         )
         r.raise_for_status()
         data = r.json()
-    except Exception as e:  # network blocked, rate-limited, schema change...
+    except Exception as e:
         print(f"[polymarket] {e}")
         return pd.DataFrame()
 
@@ -69,7 +116,6 @@ def fetch_polymarket(query: str = "World Cup", limit: int = 100) -> pd.DataFrame
         title = m.get("question") or m.get("title") or ""
         if query.lower() not in title.lower():
             continue
-        # Gamma stores outcomes and prices as JSON-encoded strings.
         try:
             outcomes = json.loads(m.get("outcomes", "[]"))
             prices = [float(p) for p in json.loads(m.get("outcomePrices", "[]"))]
@@ -77,16 +123,26 @@ def fetch_polymarket(query: str = "World Cup", limit: int = 100) -> pd.DataFrame
             continue
         for o, p in zip(outcomes, prices):
             rows.append({"platform": "polymarket", "market": title,
-                         "outcome": o, "price": p})
+                         "outcome": o, "price": p,
+                         "team": None, "round": "champion"})
     return pd.DataFrame(rows)
 
 
-def fetch_kalshi(query: str = "World Cup", limit: int = 200) -> pd.DataFrame:
-    """List Kalshi markets and keep those whose title matches the query."""
+def fetch_kalshi() -> pd.DataFrame:
+    """Fetch the KXWCROUND survival markets from Kalshi.
+
+    Targets the series_ticker=KXWCROUND directly — the generic /markets
+    endpoint's default sort never surfaces WC markets in 200 rows.
+
+    API v2 price fields are yes_bid_dollars / yes_ask_dollars (0-1 range,
+    not cents). The old yes_bid / yes_ask fields are deprecated and return None.
+
+    Returns one row per (team, round) with the mid-price.
+    """
     try:
         r = requests.get(
             f"{config.KALSHI_BASE}/markets",
-            params={"status": "open", "limit": limit},
+            params={"series_ticker": "KXWCROUND", "limit": 200},
             timeout=20,
         )
         r.raise_for_status()
@@ -97,40 +153,89 @@ def fetch_kalshi(query: str = "World Cup", limit: int = 200) -> pd.DataFrame:
 
     rows = []
     for m in markets:
+        ticker = m.get("ticker", "")
         title = m.get("title", "")
-        if query.lower() not in title.lower():
+
+        # Identify which round this market is for
+        round_code = None
+        for code in _KALSHI_ROUND_MAP:
+            if f"-{code}-" in ticker:
+                round_code = code
+                break
+        if round_code is None:
             continue
-        # yes_bid/yes_ask are in cents; use mid as the implied price.
-        bid, ask = m.get("yes_bid"), m.get("yes_ask")
+
+        # Extract team name from title
+        team_match = _KALSHI_TEAM_PATTERN.search(title)
+        if not team_match:
+            continue
+        team = team_match.group(1).strip()
+
+        # API v2: prices are in yes_bid_dollars / yes_ask_dollars (0-1 range)
+        bid = m.get("yes_bid_dollars")
+        ask = m.get("yes_ask_dollars")
         if bid is None or ask is None:
             continue
-        mid_cents = (bid + ask) / 2
-        rows.append({"platform": "kalshi", "market": title,
-                     "outcome": m.get("yes_sub_title") or "YES",
-                     "price": mid_cents / 100.0})
+        bid, ask = float(bid), float(ask)
+        mid = (bid + ask) / 2
+
+        rows.append({
+            "platform": "kalshi",
+            "market":   title,
+            "outcome":  team,     # team name (for compatibility with live-markets tab)
+            "price":    mid,
+            "team":     team,
+            "round":    _KALSHI_ROUND_MAP[round_code],
+            "bid":      bid,
+            "ask":      ask,
+        })
+
     return pd.DataFrame(rows)
 
 
 def mock_markets() -> pd.DataFrame:
     """Offline sample so the UI works with no network. Numbers are made up."""
-    return pd.DataFrame(
-        [
-            {"platform": "polymarket", "market": "2026 World Cup Winner",
-             "outcome": t, "price": p}
-            for t, p in {"Brazil": 0.18, "France": 0.16, "Argentina": 0.15,
-                         "England": 0.10, "Spain": 0.12}.items()
+    pm_rows = [
+        {"platform": "polymarket", "market": "Will Brazil win the 2026 FIFA World Cup?",
+         "outcome": "Yes", "price": 0.18, "team": "Brazil", "round": "champion"},
+        {"platform": "polymarket", "market": "Will France win the 2026 FIFA World Cup?",
+         "outcome": "Yes", "price": 0.16, "team": "France", "round": "champion"},
+        {"platform": "polymarket", "market": "Will Spain win the 2026 FIFA World Cup?",
+         "outcome": "Yes", "price": 0.15, "team": "Spain", "round": "champion"},
+    ]
+    ks_rows = [
+        {"platform": "kalshi", "market": f"Will {t} qualify for FIFA World Cup {r_name}?",
+         "outcome": t, "price": p, "team": t, "round": r_label, "bid": p - 0.005, "ask": p + 0.005}
+        for t, r_label, r_name, p in [
+            ("Spain",     "R16",   "Round of 16", 0.77),
+            ("Brazil",    "R16",   "Round of 16", 0.69),
+            ("France",    "R16",   "Round of 16", 0.78),
+            ("Spain",     "QF",    "Quarterfinals", 0.55),
+            ("Brazil",    "QF",    "Quarterfinals", 0.47),
+            ("France",    "QF",    "Quarterfinals", 0.52),
+            ("Spain",     "SF",    "Semifinals", 0.30),
+            ("Brazil",    "SF",    "Semifinals", 0.25),
+            ("France",    "SF",    "Semifinals", 0.28),
+            ("Spain",     "final", "Final", 0.17),
+            ("Brazil",    "final", "Final", 0.14),
+            ("France",    "final", "Final", 0.15),
         ]
-        + [
-            {"platform": "kalshi", "market": "2026 World Cup Winner",
-             "outcome": t, "price": p}
-            for t, p in {"Brazil": 0.20, "France": 0.15, "Argentina": 0.14,
-                         "England": 0.11, "Spain": 0.13}.items()
-        ]
-    )
+    ]
+    return pd.DataFrame(pm_rows + ks_rows)
 
 
-def get_all(query: str = "World Cup", use_mock_fallback: bool = True) -> pd.DataFrame:
-    df = pd.concat([fetch_polymarket(query), fetch_kalshi(query)], ignore_index=True)
+def get_all(use_mock_fallback: bool = True) -> pd.DataFrame:
+    """Fetch and combine Polymarket + Kalshi WC market data.
+
+    Returns a unified DataFrame with columns:
+      platform, market, outcome, price, team, round
+    where `round` is:
+      'champion'         — Polymarket winner markets
+      'R16','QF','SF','final' — Kalshi KXWCROUND survival markets
+    """
+    pm = fetch_polymarket()
+    ks = fetch_kalshi()
+    df = pd.concat([pm, ks], ignore_index=True)
     if df.empty and use_mock_fallback:
         print("[markets] live fetch empty -> using mock data")
         return mock_markets()
@@ -138,4 +243,19 @@ def get_all(query: str = "World Cup", use_mock_fallback: bool = True) -> pd.Data
 
 
 if __name__ == "__main__":
-    print(get_all().to_string(index=False))
+    df = get_all()
+    print(f"Total rows: {len(df)}")
+    print()
+    for plat in df["platform"].unique():
+        sub = df[df["platform"] == plat]
+        print(f"--- {plat} ---")
+        if "round" in sub.columns:
+            for rnd in sub["round"].unique():
+                rnd_sub = sub[sub["round"] == rnd]
+                print(f"  {rnd}: {len(rnd_sub)} markets, "
+                      f"price range [{rnd_sub['price'].min():.3f}, {rnd_sub['price'].max():.3f}]")
+                # Show top 3 by price
+                for _, row in rnd_sub.nlargest(3, "price").iterrows():
+                    name = row.get("team") or row.get("outcome") or "?"
+                    print(f"    {str(name):<25} {row['price']:.3f}")
+        print()

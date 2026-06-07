@@ -61,10 +61,16 @@ GROUPS_2026: dict[str, list[str]] = {
 # that differ from the FIFA draw names stored as keys in GROUPS_2026 / mc_survival.
 # Used by the streamlit edge tab to align market team names with MC survival keys.
 MARKET_TO_FIFA: dict[str, str] = {
-    "USA":         "United States",
-    "Ivory Coast": "Côte d'Ivoire",
-    "Cape Verde":  "Cabo Verde",
-    "Turkiye":     "Türkiye",   # Polymarket omits the umlaut
+    # --- Polymarket ---
+    "USA":                   "United States",
+    "Ivory Coast":           "Côte d'Ivoire",
+    "Cape Verde":            "Cabo Verde",
+    "Turkiye":               "Türkiye",        # Polymarket drops the umlaut
+    # --- Kalshi ---
+    "Korea Republic":        "South Korea",    # FIFA/Kalshi official name
+    "IR Iran":               "Iran",
+    "Bosnia and Herzegovina":"Bosnia-Herzegovina",
+    "Curacao":               "Curaçao",        # Kalshi drops the cedilla
 }
 
 # Six FIFA names differ from the spelling used in martj42's historical results CSV.

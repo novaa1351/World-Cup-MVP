@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 from src.data.historical import download_results, load_results
-from src.data.markets import get_all, winner_probs
+from src.data.markets import get_all, winner_probs, kalshi_survival_probs
 from src.models.elo import compute_elo, top_n
 from src.models.tournament import simulate_tournament, survival_table, GROUPS_2026, MARKET_TO_FIFA
 from src.models.svi_surface import SurvivalSurface
@@ -72,11 +72,41 @@ with tab_mkt:
     if markets.empty:
         st.warning("No markets returned (API may be unavailable).")
     else:
-        st.dataframe(markets, use_container_width=True)
-        for plat in markets["platform"].unique():
-            sub = markets[markets["platform"] == plat]
-            book = dict(zip(sub["outcome"], sub["price"]))
-            st.write(f"**{plat}** de-vigged:", implied_from_book(book))
+        pm_sub = markets[markets["platform"] == "polymarket"]
+        ks_sub = markets[markets["platform"] == "kalshi"]
+
+        st.markdown("#### Polymarket — champion winner markets")
+        if pm_sub.empty:
+            st.info("No Polymarket data.")
+        else:
+            raw_yes = winner_probs(pm_sub)
+            if raw_yes:
+                pm_display = (
+                    pd.DataFrame.from_dict(raw_yes, orient="index", columns=["raw YES price"])
+                    .join(
+                        pd.DataFrame.from_dict(implied_from_book(raw_yes), orient="index", columns=["de-vigged prob"])
+                    )
+                    .sort_values("de-vigged prob", ascending=False)
+                )
+                st.dataframe(pm_display.style.format("{:.3f}"), use_container_width=True)
+                st.caption(f"Overround: {(sum(raw_yes.values()) - 1)*100:.1f} pp")
+            else:
+                st.dataframe(pm_sub[["market", "outcome", "price"]], use_container_width=True)
+
+        st.markdown("#### Kalshi — round survival markets (KXWCROUND)")
+        if ks_sub.empty:
+            st.info("No Kalshi data.")
+        else:
+            ks_pivot = (
+                ks_sub[["team", "round", "price"]]
+                .dropna(subset=["team", "round"])
+                .pivot_table(index="team", columns="round", values="price", aggfunc="mean")
+            )
+            # Order columns by round depth
+            col_order = [c for c in ["R16", "QF", "SF", "final"] if c in ks_pivot.columns]
+            ks_pivot = ks_pivot[col_order].sort_values(col_order[-1] if col_order else "R16", ascending=False)
+            st.dataframe(ks_pivot.style.format("{:.3f}"), use_container_width=True)
+            st.caption(f"{len(ks_sub['team'].unique())} teams, {len(col_order)} rounds from Kalshi KXWCROUND series")
 
 # --- Model forecast ---------------------------------------------------------
 with tab_model:
@@ -114,99 +144,133 @@ with tab_model:
 with tab_edge:
     st.subheader("Model vs market edge")
     st.caption(
-        "Each bar is one team: **model P(win WC)** minus **market-implied P(win WC)**. "
-        "Green = model thinks the market underprices the team (potential value). "
-        "Red = market overprices relative to model."
+        "**Green** = model thinks the market underprices the outcome (potential value). "
+        "**Red** = market overprices relative to our Elo+MC model."
     )
 
     if markets.empty:
         st.info("No market data available — edge detection requires live market prices.")
     else:
-        plat = st.selectbox("Platform", markets["platform"].unique())
-        sub = markets[markets["platform"] == plat]
+        pm_sub = markets[markets["platform"] == "polymarket"]
+        ks_sub = markets[markets["platform"] == "kalshi"]
 
-        # Polymarket/Kalshi return binary per-team markets ("Will X win?") with
-        # "Yes"/"No" outcomes.  winner_probs() extracts the team name from the
-        # market title and keeps only the YES price, giving {team: yes_price}.
-        raw_yes: dict[str, float] = winner_probs(sub)
-
-        if not raw_yes:
-            st.warning(
-                "Could not parse any team winner markets from this platform. "
-                "The market titles may not match the expected pattern "
-                "'Will <team> win the 2026 FIFA World Cup?'"
-            )
+        # ── Section 1: Polymarket champion odds ──────────────────────────────
+        st.markdown("### Polymarket — champion (winner) edges")
+        if pm_sub.empty:
+            st.info("No Polymarket data available.")
         else:
-            # De-vig: treat all YES prices as a multi-outcome book (they should
-            # sum to ~1 + overround across the full field).
-            market_p = implied_from_book(raw_yes)
+            raw_yes: dict[str, float] = winner_probs(pm_sub)
+            if not raw_yes:
+                st.warning("Could not parse winner markets from Polymarket titles.")
+            else:
+                market_p: dict[str, float] = implied_from_book(raw_yes)
+                model_p: dict[str, float] = {}
+                unmatched_pm: list[str] = []
+                for mkt_team, mkt_prob in market_p.items():
+                    fifa_name = MARKET_TO_FIFA.get(mkt_team, mkt_team)
+                    if fifa_name in mc_survival:
+                        model_p[mkt_team] = mc_survival[fifa_name]["champion"]
+                    else:
+                        unmatched_pm.append(mkt_team)
+                if unmatched_pm:
+                    st.caption(f"Skipped (not in MC bracket): {', '.join(unmatched_pm)}")
+                if model_p:
+                    et = edge_table(model_p, market_p)
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Teams compared", len(et))
+                    c2.metric("Overround", f"{(sum(raw_yes.values())-1)*100:.1f} pp")
+                    c3.metric("Largest edge", f"{et['edge_pct'].abs().max():.1f} pp")
+                    st.plotly_chart(charts.edge_bars(et), use_container_width=True)
+                    st.plotly_chart(charts.model_vs_market_scatter(et), use_container_width=True)
+                    flagged = flag_value(et)
+                    if not flagged.empty:
+                        st.markdown("**Value flags (|edge| > 5 pp)**")
+                        st.dataframe(
+                            flagged[["outcome", "model_prob", "market_prob", "edge_pct"]]
+                            .rename(columns={"edge_pct": "edge (pp)"})
+                            .style.format({"model_prob": "{:.1%}", "market_prob": "{:.1%}",
+                                           "edge (pp)": "{:+.1f}"}),
+                            use_container_width=True,
+                        )
+                    else:
+                        st.info("No champion edges above 5 pp threshold.")
+                    with st.expander("Full champion edge table"):
+                        st.dataframe(
+                            et[["outcome", "model_prob", "market_prob", "edge_pct",
+                                "fair_odds", "market_odds"]]
+                            .rename(columns={"edge_pct": "edge (pp)"})
+                            .style.format({"model_prob": "{:.1%}", "market_prob": "{:.1%}",
+                                           "edge (pp)": "{:+.1f}", "fair_odds": "{:.2f}",
+                                           "market_odds": "{:.2f}"}),
+                            use_container_width=True,
+                        )
 
-            # Align market team names → MC survival keys (FIFA draw names).
-            # MARKET_TO_FIFA handles the three known spelling differences:
-            #   "USA" → "United States", "Ivory Coast" → "Côte d'Ivoire",
-            #   "Cape Verde" → "Cabo Verde".
-            model_p: dict[str, float] = {}
-            unmatched: list[str] = []
-            for mkt_team, mkt_prob in market_p.items():
+        st.divider()
+
+        # ── Section 2: Kalshi round-survival edges ────────────────────────────
+        st.markdown("### Kalshi — round survival edges (KXWCROUND)")
+        st.caption(
+            "Kalshi has per-team, per-round binary markets: "
+            "'Will X qualify for the Round of 16 / QF / SF / Final?' "
+            "The YES mid-price is the market-implied survival probability at that round. "
+            "We compare those against our MC model's survival probabilities at the same rounds."
+        )
+        if ks_sub.empty:
+            st.info("No Kalshi data available.")
+        else:
+            ks_survival = kalshi_survival_probs(ks_sub)
+            kalshi_rounds = ["R16", "QF", "SF", "final"]
+            round_choice = st.selectbox(
+                "Round to analyse",
+                [r for r in kalshi_rounds if any(r in probs for probs in ks_survival.values())],
+                key="kalshi_round_select",
+            )
+
+            ks_model_p: dict[str, float] = {}
+            ks_market_p: dict[str, float] = {}
+            for mkt_team, round_probs in ks_survival.items():
+                if round_choice not in round_probs:
+                    continue
                 fifa_name = MARKET_TO_FIFA.get(mkt_team, mkt_team)
-                if fifa_name in mc_survival:
-                    model_p[mkt_team] = mc_survival[fifa_name]["champion"]
-                else:
-                    unmatched.append(mkt_team)
+                if fifa_name not in mc_survival:
+                    continue
+                ks_model_p[mkt_team] = mc_survival[fifa_name][round_choice]
+                ks_market_p[mkt_team] = round_probs[round_choice]
 
-            if unmatched:
-                st.caption(f"Teams in market but not in MC bracket (skipped): {', '.join(unmatched)}")
-
-            if model_p:
-                et = edge_table(model_p, market_p)
-
-                col_info1, col_info2, col_info3 = st.columns(3)
-                col_info1.metric("Teams compared", len(et))
-                col_info2.metric(
-                    "Overround (vig)",
-                    f"{(sum(raw_yes.values()) - 1) * 100:.1f} pp",
-                    help="Sum of all YES prices minus 1. Positive = market takes a cut.",
-                )
-                col_info3.metric(
-                    "Largest model edge",
-                    f"{et['edge_pct'].abs().max():.1f} pp",
-                    help="Biggest disagreement between model and market (absolute).",
-                )
-
-                st.plotly_chart(charts.edge_bars(et), use_container_width=True)
-                st.plotly_chart(charts.model_vs_market_scatter(et), use_container_width=True)
-
-                flagged = flag_value(et)
-                if not flagged.empty:
-                    st.subheader("Value flags (|edge| > 5 pp)")
+            if ks_model_p:
+                ks_et = edge_table(ks_model_p, ks_market_p)
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Teams compared", len(ks_et))
+                c2.metric("Largest edge", f"{ks_et['edge_pct'].abs().max():.1f} pp")
+                avg_mkt = ks_market_p  # raw, not de-vigged (each market is independent binary)
+                c3.metric("Market avg price", f"{sum(avg_mkt.values())/len(avg_mkt):.3f}",
+                          help="Mean YES mid-price across all teams for this round")
+                st.plotly_chart(charts.edge_bars(ks_et), use_container_width=True)
+                st.plotly_chart(charts.model_vs_market_scatter(ks_et), use_container_width=True)
+                ks_flagged = flag_value(ks_et)
+                if not ks_flagged.empty:
+                    st.markdown(f"**Value flags at {round_choice} (|edge| > 5 pp)**")
                     st.dataframe(
-                        flagged[["outcome", "model_prob", "market_prob",
-                                 "edge_pct", "fair_odds", "market_odds"]]
+                        ks_flagged[["outcome", "model_prob", "market_prob", "edge_pct"]]
                         .rename(columns={"edge_pct": "edge (pp)"})
-                        .style.format({
-                            "model_prob": "{:.1%}", "market_prob": "{:.1%}",
-                            "edge (pp)": "{:+.1f}", "fair_odds": "{:.2f}",
-                            "market_odds": "{:.2f}",
-                        }),
+                        .style.format({"model_prob": "{:.1%}", "market_prob": "{:.1%}",
+                                       "edge (pp)": "{:+.1f}"}),
                         use_container_width=True,
                     )
                 else:
-                    st.info("No edges above 5 pp threshold — model and market broadly agree.")
-
-                with st.expander("Full edge table"):
+                    st.info(f"No edges above 5 pp at {round_choice}.")
+                with st.expander(f"Full {round_choice} edge table"):
                     st.dataframe(
-                        et[["outcome", "model_prob", "market_prob", "edge_pct",
-                            "fair_odds", "market_odds"]]
+                        ks_et[["outcome", "model_prob", "market_prob", "edge_pct",
+                               "fair_odds", "market_odds"]]
                         .rename(columns={"edge_pct": "edge (pp)"})
-                        .style.format({
-                            "model_prob": "{:.1%}", "market_prob": "{:.1%}",
-                            "edge (pp)": "{:+.1f}", "fair_odds": "{:.2f}",
-                            "market_odds": "{:.2f}",
-                        }),
+                        .style.format({"model_prob": "{:.1%}", "market_prob": "{:.1%}",
+                                       "edge (pp)": "{:+.1f}", "fair_odds": "{:.2f}",
+                                       "market_odds": "{:.2f}"}),
                         use_container_width=True,
                     )
             else:
-                st.warning("No MC teams matched to market team names.")
+                st.warning("Could not match Kalshi teams to MC survival dictionary.")
 
 # --- Survival surface -------------------------------------------------------
 with tab_surf:
