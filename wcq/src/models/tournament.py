@@ -192,15 +192,20 @@ def simulate_tournament(
     groups: dict[str, list[str]] | None = None,
     n_sims: int = config.MC_SIMS,
     seed: int | None = None,
+    draw_base: float | None = None,
+    scale: float | None = None,
 ) -> dict[str, dict[str, float]]:
     """Run a Monte Carlo bracket simulation of the 2026 World Cup.
 
     Args:
-        elo:    Team Elo ratings (output of elo.compute_elo). Teams absent from
-                this dict fall back to config.ELO_BASE.
-        groups: Override the default GROUPS_2026 bracket.
-        n_sims: Number of Monte Carlo iterations (default config.MC_SIMS=20 000).
-        seed:   RNG seed for reproducibility.
+        elo:       Team Elo ratings (output of elo.compute_elo). Teams absent
+                   from this dict fall back to config.ELO_BASE.
+        groups:    Override the default GROUPS_2026 bracket.
+        n_sims:    Number of Monte Carlo iterations (default config.MC_SIMS).
+        seed:      RNG seed for reproducibility.
+        draw_base: Draw model override — passed through to match_probs().
+                   None = use calibrated file or hard default.
+        scale:     Elo-gap decay constant override. None = same resolution.
 
     Returns:
         dict[team -> dict[round -> float]] — survival probability at each
@@ -221,7 +226,8 @@ def simulate_tournament(
     group_probs: dict[str, dict[tuple[str, str], dict[str, float]]] = {}
     for gid, teams in groups.items():
         group_probs[gid] = {
-            (h, a): match_probs(_elo(h, elo, base), _elo(a, elo, base))
+            (h, a): match_probs(_elo(h, elo, base), _elo(a, elo, base),
+                                draw_base=draw_base, scale=scale)
             for h, a in combinations(teams, 2)
         }
 
@@ -230,7 +236,8 @@ def simulate_tournament(
     for a in all_teams:
         for b in all_teams:
             if a != b:
-                p_ko[a][b] = win_prob_knockout(_elo(a, elo, base), _elo(b, elo, base))
+                p_ko[a][b] = win_prob_knockout(_elo(a, elo, base), _elo(b, elo, base),
+                                               draw_base=draw_base, scale=scale)
 
     counts: dict[str, dict[str, int]] = {
         t: {r: 0 for r in config.ROUNDS} for t in all_teams

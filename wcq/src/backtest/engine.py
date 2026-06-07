@@ -52,14 +52,25 @@ def brier_score(p_model: np.ndarray, outcome: np.ndarray) -> float:
     return float(np.mean((p_model - outcome) ** 2))
 
 
-def build_wc_backtest(year: int, all_matches: pd.DataFrame) -> pd.DataFrame:
+def build_wc_backtest(
+    year: int,
+    all_matches: pd.DataFrame,
+    elo_reversion: float = config.ELO_MEAN_REVERSION,
+    use_tournament_k: bool = True,
+    draw_base: float | None = None,
+    scale: float | None = None,
+) -> pd.DataFrame:
     """Build a per-outcome backtest DataFrame for a historical World Cup.
 
     Args:
-        year:        2018 or 2022.
-        all_matches: Full historical match DataFrame from historical.load_results().
-                     Matches from the WC start date onwards are excluded from
-                     Elo training — the function enforces this internally.
+        year:             2018 or 2022.
+        all_matches:      Full historical match DataFrame from load_results().
+                          Matches from the WC start date onwards are excluded
+                          from Elo training — no lookahead bias.
+        elo_reversion:    Annual mean-reversion rate for Elo (0.0 = off).
+        use_tournament_k: Apply tournament tier K-scaling (eloratings.net).
+        draw_base:        Draw model override passed through to match_probs().
+        scale:            Elo-gap decay constant override.
 
     Returns:
         DataFrame with one row per (match × outcome) and columns:
@@ -75,7 +86,7 @@ def build_wc_backtest(year: int, all_matches: pd.DataFrame) -> pd.DataFrame:
 
     # --- Elo trained strictly before the WC started -----------------------
     train = all_matches[all_matches["date"] < cutoff]
-    elo = compute_elo(train)
+    elo = compute_elo(train, reversion=elo_reversion, use_tournament_k=use_tournament_k)
     base = config.ELO_BASE
 
     # --- Pull actual WC match rows ----------------------------------------
@@ -92,8 +103,8 @@ def build_wc_backtest(year: int, all_matches: pd.DataFrame) -> pd.DataFrame:
     for row in wc.itertuples(index=False):
         r_home = elo.get(row.home_team, base)
         r_away = elo.get(row.away_team, base)
-        # Respect the neutral flag from the original dataset (host nation is False)
-        probs = match_probs(r_home, r_away, neutral=bool(row.neutral))
+        probs = match_probs(r_home, r_away, neutral=bool(row.neutral),
+                            draw_base=draw_base, scale=scale)
         baseline = expected_score(r_home, r_away)  # raw 2-way Elo, ignores draws
 
         actual_home = int(row.home_score)
@@ -176,12 +187,24 @@ def run_backtest(
     }
 
 
-def run_wc_backtest(year: int, all_matches: pd.DataFrame, **kwargs) -> dict:
+def run_wc_backtest(
+    year: int,
+    all_matches: pd.DataFrame,
+    elo_reversion: float = config.ELO_MEAN_REVERSION,
+    use_tournament_k: bool = True,
+    draw_base: float | None = None,
+    scale: float | None = None,
+    **kwargs,
+) -> dict:
     """Convenience wrapper: build the dataset and run the backtest in one call.
 
     Returns the run_backtest() dict plus the raw `data` DataFrame and `year`.
     """
-    data = build_wc_backtest(year, all_matches)
+    data = build_wc_backtest(year, all_matches,
+                             elo_reversion=elo_reversion,
+                             use_tournament_k=use_tournament_k,
+                             draw_base=draw_base,
+                             scale=scale)
     result = run_backtest(data, **kwargs)
     result["data"] = data
     result["year"] = year

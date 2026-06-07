@@ -206,39 +206,46 @@ def match_probs(
     elo_away: float,
     neutral: bool = True,
     home_adv: float = config.ELO_HOME_ADV,
-    draw_base: float | None = None,   # override (e.g. for tests); None = load from file
+    draw_base: float | None = None,
+    scale: float | None = None,
 ) -> dict[str, float]:
     """Return {'home', 'draw', 'away'} probabilities summing to 1.
 
-    Uses the calibrated exponential draw model fitted by fit_draw_params().
-    Falls back to draw_base=0.28, scale=400 when no fitted file is present.
+    Resolution order for draw_base / scale:
+      1. Explicit argument (not None) — used directly.
+      2. Fitted file at config.DRAW_PARAMS_PATH — loaded once per process.
+      3. Hard defaults: draw_base=0.28, scale=400.
 
     Args:
-        elo_home: Pre-match Elo rating of the home/first team.
-        elo_away: Pre-match Elo rating of the away/second team.
-        neutral:  True if played at a neutral venue.
-        home_adv: Elo-point boost for the home team when neutral=False.
-        draw_base: Optional hard override for draw_base (ignores fitted file).
+        elo_home:  Pre-match Elo rating of the home/first team.
+        elo_away:  Pre-match Elo rating of the away/second team.
+        neutral:   True if played at a neutral venue.
+        home_adv:  Elo-point boost for the home team when neutral=False.
+        draw_base: Override for the equal-strength draw probability.
+        scale:     Override for the Elo-gap decay constant.
     """
     adv = 0.0 if neutral else home_adv
     elo_diff = (elo_home + adv) - elo_away
 
-    if draw_base is not None:
-        # Explicit override — use default scale
-        ph, pd_, pa = _three_way_probs(elo_diff, draw_base, _DEFAULT_SCALE)
-    else:
-        params = _load_draw_params()
-        if params is not None:
-            ph, pd_, pa = _three_way_probs(elo_diff, params["draw_base"], params["scale"])
-        else:
-            ph, pd_, pa = _three_way_probs(elo_diff, _DEFAULT_DRAW_BASE, _DEFAULT_SCALE)
+    # Resolve parameters: explicit arg > fitted file > hard default
+    params = _load_draw_params()
+    _db = draw_base if draw_base is not None else (
+        params["draw_base"] if params else _DEFAULT_DRAW_BASE)
+    _sc = scale if scale is not None else (
+        params["scale"] if params else _DEFAULT_SCALE)
 
+    ph, pd_, pa = _three_way_probs(elo_diff, _db, _sc)
     return {"home": ph, "draw": pd_, "away": pa}
 
 
-def win_prob_knockout(elo_a: float, elo_b: float) -> float:
+def win_prob_knockout(
+    elo_a: float,
+    elo_b: float,
+    draw_base: float | None = None,
+    scale: float | None = None,
+) -> float:
     """P(A beats B) in a knockout tie; draws resolved by ET/penalties ≈ coin."""
-    p = match_probs(elo_a, elo_b)
+    p = match_probs(elo_a, elo_b, draw_base=draw_base, scale=scale)
     return p["home"] + 0.5 * p["draw"]
 
 

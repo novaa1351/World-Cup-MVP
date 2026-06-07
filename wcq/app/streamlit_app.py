@@ -32,9 +32,9 @@ st.set_page_config(page_title="World Cup Quant Dashboard", layout="wide")
 
 
 @st.cache_data(show_spinner="Loading match history + computing Elo...")
-def load_elo() -> dict[str, float]:
+def load_elo(reversion: float, use_tournament_k: bool) -> dict[str, float]:
     matches = download_results()
-    return compute_elo(matches)
+    return compute_elo(matches, reversion=reversion, use_tournament_k=use_tournament_k)
 
 
 @st.cache_data(show_spinner="Fetching prediction markets...")
@@ -42,52 +42,136 @@ def load_markets() -> pd.DataFrame:
     return get_all()
 
 
-@st.cache_data(show_spinner=f"Running {config.MC_SIMS:,} Monte Carlo simulations...")
-def load_mc(_elo_frozen: tuple) -> dict[str, dict[str, float]]:
+@st.cache_data(show_spinner="Running Monte Carlo simulations...")
+def load_mc(
+    _elo_frozen: tuple,
+    draw_base: float,
+    scale: float,
+    n_sims: int,
+) -> dict[str, dict[str, float]]:
     # _elo_frozen is a tuple of (team, rating) pairs so st.cache_data can hash it.
-    return simulate_tournament(dict(_elo_frozen), seed=42)
+    return simulate_tournament(
+        dict(_elo_frozen), seed=42, n_sims=n_sims,
+        draw_base=draw_base, scale=scale,
+    )
 
 
 @st.cache_data(show_spinner="Running historical backtest (rebuilding pre-WC Elo)...")
-def load_backtest(year: int) -> dict:
-    # load_results() reads from the cached local CSV — no network call.
-    return run_wc_backtest(year, load_results(), edge_threshold=0.05)
+def load_backtest(
+    year: int,
+    reversion: float,
+    use_tournament_k: bool,
+    draw_base: float,
+    scale: float,
+) -> dict:
+    return run_wc_backtest(
+        year, load_results(),
+        elo_reversion=reversion, use_tournament_k=use_tournament_k,
+        draw_base=draw_base, scale=scale,
+        edge_threshold=0.05,
+    )
 
 
 st.title("⚽ World Cup Quant Dashboard")
 st.caption("Model vs. prediction markets · educational tool, not betting advice")
 
-# Sidebar: model status
-with st.sidebar:
-    st.header("Model info")
-    if draw_params_available():
-        import json
-        with open(config.DRAW_PARAMS_PATH) as _f:
-            _p = json.load(_f)
-        st.success("Calibrated draw model active")
-        st.caption(
-            f"draw_base={_p['draw_base']:.3f} · scale={_p['scale']:.0f}\n"
-            f"Fit on {_p.get('n_matches', '?'):,} competitive matches"
-        )
-    else:
-        st.warning("Draw params not fitted — using defaults (draw_base=0.28)")
-        st.caption("Run once to fit:")
-        st.code("python src/models/match_model.py")
-        if st.button("Fit draw parameters now (≈5 s)"):
-            with st.spinner("Fitting draw model parameters…"):
-                _matches = load_results()
-                fit_draw_params(_matches)
-            st.success("Done! Reload the page to use the calibrated model.")
-    st.divider()
-    st.caption(
-        "Elo: tournament K-weighted (eloratings.net) "
-        "+ 5 % annual mean-reversion."
-    )
+# ---------------------------------------------------------------------------
+# Sidebar — model configuration
+# ---------------------------------------------------------------------------
+_fitted = None
+if draw_params_available():
+    import json as _json
+    with open(config.DRAW_PARAMS_PATH) as _f:
+        _fitted = _json.load(_f)
 
-elo = load_elo()
+# Model presets: each is a self-consistent bundle of Elo + draw parameters.
+_PRESETS: dict[str, dict] = {
+    "Standard": {
+        "reversion": 0.05,
+        "use_tournament_k": True,
+        "draw_base": _fitted["draw_base"] if _fitted else 0.28,
+        "scale":     _fitted["scale"]     if _fitted else 400.0,
+        "tag":       "Recommended",
+        "desc": (
+            "Tournament K-weighted Elo (WC matches count 50 % more than qualifiers), "
+            "5 % annual mean-reversion, draw probabilities MLE-calibrated from data."
+        ),
+    },
+    "Simple": {
+        "reversion": 0.0,
+        "use_tournament_k": False,
+        "draw_base": 0.28,
+        "scale":     400.0,
+        "tag":       "Original",
+        "desc": (
+            "Flat K=40 for every match, no recency decay, draw_base=0.28 hardcoded. "
+            "Closest to the original unmodified Elo model."
+        ),
+    },
+    "No-Reversion": {
+        "reversion": 0.0,
+        "use_tournament_k": True,
+        "draw_base": _fitted["draw_base"] if _fitted else 0.28,
+        "scale":     _fitted["scale"]     if _fitted else 400.0,
+        "tag":       "History-weighted",
+        "desc": (
+            "Tournament K-weighting on, but zero mean-reversion — older WC wins "
+            "keep their full weight indefinitely."
+        ),
+    },
+}
+
+_SIM_OPTIONS = {"Fast — 5 k": 5_000, "Standard — 20 k": 20_000}
+
+with st.sidebar:
+    st.header("Model configuration")
+    st.caption("Switch configs to see how the forecast changes — each uses a different Elo and draw model. Results are cached per combination.")
+
+    _preset_name = st.radio(
+        "Match model",
+        list(_PRESETS),
+        index=0,
+        format_func=lambda k: f"{k}  [{_PRESETS[k]['tag']}]",
+    )
+    _preset = _PRESETS[_preset_name]
+
+    with st.expander("What does this model do?"):
+        st.caption(_preset["desc"])
+        st.caption(
+            f"**Elo:** reversion={_preset['reversion']:.0%}/yr · "
+            f"tournament K={'on' if _preset['use_tournament_k'] else 'off'}"
+        )
+        st.caption(
+            f"**Draws:** draw_base={_preset['draw_base']:.3f} · "
+            f"scale={_preset['scale']:.0f}"
+        )
+
+    st.divider()
+
+    _sim_label = st.radio("Simulation depth", list(_SIM_OPTIONS), index=1)
+    _n_sims = _SIM_OPTIONS[_sim_label]
+    st.caption(f"{_n_sims:,} Monte Carlo sims · seed=42")
+
+    st.divider()
+
+    if not draw_params_available():
+        st.warning("Draw params not calibrated — Standard/No-Reversion use defaults.")
+        if st.button("Calibrate draw model (≈5 s)"):
+            with st.spinner("Fitting draw parameters…"):
+                fit_draw_params(load_results())
+            st.success("Done — reload to apply.")
+
+# ---------------------------------------------------------------------------
+# Load data with the selected configuration
+# ---------------------------------------------------------------------------
+_rev   = _preset["reversion"]
+_use_k = _preset["use_tournament_k"]
+_db    = _preset["draw_base"]
+_sc    = _preset["scale"]
+
+elo = load_elo(_rev, _use_k)
 markets = load_markets()
-# Convert elo dict to a hashable form for cache key
-mc_survival = load_mc(tuple(sorted(elo.items())))
+mc_survival = load_mc(tuple(sorted(elo.items())), _db, _sc, _n_sims)
 
 tab_mkt, tab_model, tab_edge, tab_surf, tab_bt = st.tabs(
     ["Live markets", "Model forecast", "Edge detection",
@@ -142,7 +226,7 @@ with tab_model:
     st.dataframe(top_n(elo, 20), use_container_width=True)
 
     st.divider()
-    st.subheader(f"Monte Carlo forecast — {config.MC_SIMS:,} simulations")
+    st.subheader(f"Monte Carlo forecast — {_n_sims:,} simulations · {_preset_name} model")
     st.caption(
         "Survival probabilities per round. "
         "Teams absent from historical data are assigned the ELO_BASE rating."
@@ -351,7 +435,7 @@ with tab_bt:
                            format_func=lambda y: f"{y} (Elo cutoff: {WC_CUTOFFS[y][0]})",
                            horizontal=True)
 
-    bt = load_backtest(year_choice)
+    bt = load_backtest(year_choice, _rev, _use_k, _db, _sc)
     data = bt["data"]
 
     # --- Summary metrics -------------------------------------------------------
