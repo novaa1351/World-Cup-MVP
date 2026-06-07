@@ -1,42 +1,36 @@
-"""Match-outcome probabilities using a Dixon-Coles bivariate-Poisson model.
+"""Match-outcome probabilities from Elo ratings.
 
-Dixon & Coles (1997) treat home and away goals as near-independent Poisson
-random variables with rates λ and μ, then apply a low-score correlation
-correction ρ to the four scorelines (0,0), (1,0), (0,1), (1,1) that football
-systematically over-produces relative to independent Poisson.
+Model
+-----
+P(home win), P(draw), P(away win) are derived from two components:
 
-This implementation maps Elo ratings to goal rates via two calibrated global
-parameters (μ₀, γ) fitted by maximum-likelihood on competitive historical
-matches:
+  1. Elo expected score — the standard logistic win probability for the
+     home team, treating draws as half-wins (the classic Elo formula).
 
-    λ (home team expected goals) = exp(μ₀ + γ · Δelo)
-    μ (away team expected goals) = exp(μ₀ − γ · Δelo)
+  2. Draw probability — a calibrated exponential decay in the Elo gap:
 
-where Δelo = elo_home − elo_away (neutral ground) or
-      Δelo = elo_home + ELO_HOME_ADV − elo_away (home soil).
+         P(draw | Δelo) = draw_base · exp(−|Δelo| / scale)
 
-The three parameters (μ₀, γ, ρ) are fitted by MLE and saved to
-config.DC_PARAMS_PATH.  If that file does not exist at import time the module
-falls back to the original exponential draw-rate model so that the rest of the
-pipeline keeps working without re-fitting.
+     where draw_base is the draw probability when teams are evenly matched,
+     and scale controls how quickly that probability falls as the gap widens.
+     The remaining (1 − P(draw)) mass is split by the 2-way Elo expectation.
 
-Public interface (unchanged)
-----------------------------
-match_probs(elo_home, elo_away, neutral=True, ...) → {'home', 'draw', 'away'}
-win_prob_knockout(elo_a, elo_b)                   → float
+Both draw_base and scale are fitted by maximum-likelihood on competitive
+historical matches (no friendlies, 1990+). This replaces the earlier
+hardcoded draw_base = 0.28 with a data-driven estimate.
 
 Fitting
 -------
-Run once (takes ~20–40 s on a full 50 k-match history):
+Run once (fast — ~5 s):
     python src/models/match_model.py
 
-References
-----------
-Dixon, M. J. & Coles, S. G. (1997). "Modelling association football scores
-    and inefficiencies in the football betting market." Applied Statistics
-    46(2) 265-280.
-Hvattum, L. M. & Arntzen, H. (2010). "Using ELO ratings for match result
-    prediction in association football." JQAS 6(1).
+Parameters are saved to config.DRAW_PARAMS_PATH and loaded at import time.
+If that file does not exist the module falls back to draw_base=0.28, scale=400.
+
+Public interface
+----------------
+match_probs(elo_home, elo_away, neutral=True, ...) → {'home', 'draw', 'away'}
+win_prob_knockout(elo_a, elo_b)                   → float
 """
 from __future__ import annotations
 import json
@@ -45,135 +39,96 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np
-
 import config
 from src.models.elo import compute_elo, expected_score
 
 
 # ---------------------------------------------------------------------------
-# DC parameter I/O  (loaded once per process, cached at module level)
+# Draw-model parameter I/O  (loaded once per process, cached at module level)
 # ---------------------------------------------------------------------------
 
-_DC_PARAMS: dict | None = None
+_DRAW_PARAMS: dict | None = None
+
+# Hard defaults used when no fitted file is present
+_DEFAULT_DRAW_BASE = 0.28
+_DEFAULT_SCALE = 400.0
 
 
-def _load_dc_params() -> dict | None:
-    """Load fitted DC parameters from disk; cache after first call."""
-    global _DC_PARAMS
-    if _DC_PARAMS is not None:
-        return _DC_PARAMS
-    path = config.DC_PARAMS_PATH
+def _load_draw_params() -> dict | None:
+    """Load calibrated draw parameters from disk; cache after first call."""
+    global _DRAW_PARAMS
+    if _DRAW_PARAMS is not None:
+        return _DRAW_PARAMS
+    path = config.DRAW_PARAMS_PATH
     if path.exists():
         with open(path) as f:
-            _DC_PARAMS = json.load(f)
-    return _DC_PARAMS
+            _DRAW_PARAMS = json.load(f)
+    return _DRAW_PARAMS
 
 
-def dc_params_available() -> bool:
-    """Return True if fitted Dixon-Coles parameters are present on disk."""
-    return config.DC_PARAMS_PATH.exists()
+def draw_params_available() -> bool:
+    """Return True if calibrated draw parameters exist on disk."""
+    return config.DRAW_PARAMS_PATH.exists()
 
 
 # ---------------------------------------------------------------------------
-# Dixon-Coles low-score correction
+# Core three-way probability calculation
 # ---------------------------------------------------------------------------
 
-def _tau(x: int, y: int, lam: float, mu: float, rho: float) -> float:
-    """Low-score correlation correction τ(x, y, λ, μ, ρ) — DC (1997) eq. (1).
+def _three_way_probs(
+    elo_diff: float,
+    draw_base: float,
+    scale: float,
+) -> tuple[float, float, float]:
+    """Return (P_home, P_draw, P_away) given a home-adjusted Elo difference.
 
-    Applied only to scorelines where x ≤ 1 AND y ≤ 1; equals 1 elsewhere.
-    rho < 0 increases P(0,0) relative to independent Poisson (the typical
-    football case where 0-0 draws are more common than the model would predict).
+    The draw probability peaks at draw_base when teams are equal and decays
+    exponentially as the rating gap grows. Remaining probability is split
+    proportionally to the 2-way Elo expectation.
     """
-    if x == 0 and y == 0:
-        return 1.0 - lam * mu * rho
-    if x == 1 and y == 0:
-        return 1.0 + mu * rho
-    if x == 0 and y == 1:
-        return 1.0 + lam * rho
-    if x == 1 and y == 1:
-        return 1.0 - rho
-    return 1.0
-
-
-def _dc_joint_matrix(
-    lam: float, mu: float, rho: float, max_goals: int = 10
-) -> np.ndarray:
-    """P[i, j] = DC-corrected joint probability P(home scores i, away scores j).
-
-    Sums over all i ∈ [0..max_goals], j ∈ [0..max_goals] and renormalises so
-    the mass outside this window does not distort the three outcome shares.
-    """
-    from scipy.stats import poisson
-
-    i = np.arange(max_goals + 1)
-    j = np.arange(max_goals + 1)
-
-    # Independent Poisson joint probability matrix
-    P = np.outer(poisson.pmf(i, lam), poisson.pmf(j, mu))
-
-    # Apply DC correction to the four low-score cells
-    P[0, 0] *= max(0.0, 1.0 - lam * mu * rho)   # clip avoids negative prob
-    P[1, 0] *= max(0.0, 1.0 + mu * rho)
-    P[0, 1] *= max(0.0, 1.0 + lam * rho)
-    P[1, 1] *= max(0.0, 1.0 - rho)
-
-    total = P.sum()
-    return P / total if total > 0 else P
-
-
-def _dc_outcome_probs(lam: float, mu: float, rho: float) -> dict[str, float]:
-    """Aggregate joint goal matrix into {home, draw, away} probabilities."""
-    P = _dc_joint_matrix(lam, mu, rho)
-    home = float(np.sum(np.tril(P, k=-1)))   # i > j: home scores more
-    draw = float(np.sum(np.diag(P)))          # i = j
-    away = float(np.sum(np.triu(P, k=1)))     # i < j: away scores more
-    # Re-normalise for floating-point safety
+    # Logistic 2-way win probability (ignores draws)
+    p_2way = 1.0 / (1.0 + 10.0 ** (-elo_diff / 400.0))
+    # Draw falls off with the absolute Elo gap
+    draw = draw_base * math.exp(-abs(elo_diff) / scale)
+    home = (1.0 - draw) * p_2way
+    away = (1.0 - draw) * (1.0 - p_2way)
+    # Normalise for floating-point safety
     total = home + draw + away
-    return {"home": home / total, "draw": draw / total, "away": away / total}
+    return home / total, draw / total, away / total
 
 
 # ---------------------------------------------------------------------------
-# MLE fitting
+# MLE parameter fitting
 # ---------------------------------------------------------------------------
-
-def _dc_loglik_match(x: int, y: int, lam: float, mu: float, rho: float) -> float:
-    """Log P(home=x, away=y) under the Dixon-Coles model."""
-    from math import lgamma
-    tau = _tau(x, y, lam, mu, rho)
-    if tau <= 0 or lam <= 0 or mu <= 0:
-        return -1e10
-    return (
-        math.log(tau)
-        + x * math.log(lam) - lam - lgamma(x + 1)
-        + y * math.log(mu)  - mu  - lgamma(y + 1)
-    )
-
 
 def _neg_loglik(
     params: list[float],
-    records: list[tuple[float, int, int]],
+    records: list[tuple[float, int]],
 ) -> float:
-    """Negative total log-likelihood over all (elo_diff, home_goals, away_goals)."""
-    mu_0, gamma, rho = params
+    """Negative log-likelihood of observed outcomes under the draw model.
+
+    records: list of (elo_diff, outcome) where outcome ∈ {0=home, 1=draw, 2=away}.
+    """
+    draw_base, scale = params
+    if draw_base <= 0.0 or draw_base >= 1.0 or scale <= 0.0:
+        return 1e12
     ll = 0.0
-    for elo_diff, x, y in records:
-        lam = math.exp(mu_0 + gamma * elo_diff)
-        mu  = math.exp(mu_0 - gamma * elo_diff)
-        ll += _dc_loglik_match(x, y, lam, mu, rho)
+    for elo_diff, outcome in records:
+        ph, pd_, pa = _three_way_probs(elo_diff, draw_base, scale)
+        p = (ph, pd_, pa)[outcome]
+        if p <= 0.0:
+            return 1e12
+        ll += math.log(p)
     return -ll
 
 
-def fit_dc_params(matches: "pd.DataFrame") -> dict:
-    """Fit (μ₀, γ, ρ) by MLE on competitive historical match data.
+def fit_draw_params(matches: "pd.DataFrame") -> dict:
+    """Fit (draw_base, scale) by MLE on competitive historical match data.
 
     Uses Elo differences computed incrementally (pre-match ratings) to avoid
-    any lookahead bias. Filters to non-friendly matches from 1990 onwards,
-    where both goal data and Elo ratings are most reliable for modern
-    international football.
+    any lookahead bias. Filters to non-friendly matches from 1990 onwards.
 
-    Saves the result to config.DC_PARAMS_PATH as JSON and returns the dict.
+    Saves the result to config.DRAW_PARAMS_PATH as JSON and returns the dict.
 
     Parameters
     ----------
@@ -181,73 +136,69 @@ def fit_dc_params(matches: "pd.DataFrame") -> dict:
 
     Returns
     -------
-    dict with keys: mu_0, gamma, rho, n_matches, avg_goals_per_team
+    dict with keys: draw_base, scale, n_matches
     """
     import pandas as pd
     from scipy.optimize import minimize
 
     print(f"  Computing incremental Elo history over {len(matches):,} matches…")
     _, history = compute_elo(matches, return_history=True)
-    # history[i] = (elo_diff_before_match_i, home_goals, away_goals)
-    # aligned row-for-row with matches.sort_values("date")
 
     sorted_m = matches.sort_values("date").reset_index(drop=True)
 
-    records: list[tuple[float, int, int]] = []
+    records: list[tuple[float, int]] = []
     for i, row in enumerate(sorted_m.itertuples(index=False)):
         if row.date.year < 1990:
             continue
         if "friendly" in str(row.tournament).lower():
             continue
         elo_diff, hg, ag = history[i]
-        records.append((float(elo_diff), int(hg), int(ag)))
+        hg, ag = int(hg), int(ag)
+        if hg > ag:
+            outcome = 0   # home win
+        elif hg == ag:
+            outcome = 1   # draw
+        else:
+            outcome = 2   # away win
+        records.append((float(elo_diff), outcome))
 
-    print(f"  Fitting DC model on {len(records):,} competitive matches (1990+)…")
-    avg_goals = sum(hg + ag for _, hg, ag in records) / (2 * len(records))
-
-    # Initial guess: average goals ≈ 1.25/team, neutral equal teams
-    x0 = [math.log(avg_goals), 0.0008, -0.10]
-    bounds = [
-        (math.log(0.5), math.log(3.5)),  # mu_0: avg goals 0.5–3.5 per team
-        (0.0, 0.005),                     # gamma: Elo sensitivity (positive only)
-        (-0.5, 0.3),                      # rho: low-score correlation
-    ]
+    draw_rate = sum(1 for _, o in records if o == 1) / len(records)
+    print(f"  Fitting draw model on {len(records):,} competitive matches (1990+)…")
+    print(f"  Observed draw rate: {draw_rate:.3f}")
 
     result = minimize(
         _neg_loglik,
-        x0=x0,
+        x0=[0.28, 400.0],
         args=(records,),
         method="L-BFGS-B",
-        bounds=bounds,
-        options={"maxiter": 2000, "ftol": 1e-9},
+        bounds=[(0.05, 0.60), (100.0, 2000.0)],
+        options={"maxiter": 2000, "ftol": 1e-10},
     )
 
     if not result.success:
         print(f"  Warning: optimizer did not converge — {result.message}")
 
-    mu_0, gamma, rho = result.x.tolist()
+    draw_base, scale = result.x.tolist()
     params = {
-        "mu_0":               mu_0,
-        "gamma":              gamma,
-        "rho":                rho,
-        "n_matches":          len(records),
-        "avg_goals_per_team": avg_goals,
+        "draw_base":  draw_base,
+        "scale":      scale,
+        "n_matches":  len(records),
     }
 
-    config.DC_PARAMS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(config.DC_PARAMS_PATH, "w") as f:
+    config.DRAW_PARAMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(config.DRAW_PARAMS_PATH, "w") as f:
         json.dump(params, f, indent=2)
-    print(f"  Saved to {config.DC_PARAMS_PATH}")
+    print(f"  Saved to {config.DRAW_PARAMS_PATH}")
 
-    # Invalidate the in-process cache so next match_probs call uses new params
-    global _DC_PARAMS
-    _DC_PARAMS = params
+    # Invalidate in-process cache
+    global _DRAW_PARAMS
+    _DRAW_PARAMS = params
 
     return params
 
 
 # ---------------------------------------------------------------------------
-# Public match-probability interface (same signature as the original)
+# Public match-probability interface
 # ---------------------------------------------------------------------------
 
 def match_probs(
@@ -255,39 +206,34 @@ def match_probs(
     elo_away: float,
     neutral: bool = True,
     home_adv: float = config.ELO_HOME_ADV,
-    draw_base: float = 0.28,   # unused when DC params are loaded; kept for compat
+    draw_base: float | None = None,   # override (e.g. for tests); None = load from file
 ) -> dict[str, float]:
     """Return {'home', 'draw', 'away'} probabilities summing to 1.
 
-    When Dixon-Coles parameters are available (config.DC_PARAMS_PATH exists),
-    uses the calibrated bivariate-Poisson model. Otherwise falls back to the
-    simple exponential draw-rate approximation.
+    Uses the calibrated exponential draw model fitted by fit_draw_params().
+    Falls back to draw_base=0.28, scale=400 when no fitted file is present.
 
     Args:
-        elo_home: Pre-match Elo rating for the home/first team.
-        elo_away: Pre-match Elo rating for the away/second team.
-        neutral:  True if the match is played at a neutral venue.
+        elo_home: Pre-match Elo rating of the home/first team.
+        elo_away: Pre-match Elo rating of the away/second team.
+        neutral:  True if played at a neutral venue.
         home_adv: Elo-point boost for the home team when neutral=False.
-        draw_base: Ignored when DC is active (draws emerge from the model).
-                   Kept for backward compatibility.
+        draw_base: Optional hard override for draw_base (ignores fitted file).
     """
     adv = 0.0 if neutral else home_adv
     elo_diff = (elo_home + adv) - elo_away
 
-    params = _load_dc_params()
-    if params is not None:
-        lam = math.exp(params["mu_0"] + params["gamma"] * elo_diff)
-        mu  = math.exp(params["mu_0"] - params["gamma"] * elo_diff)
-        return _dc_outcome_probs(lam, mu, params["rho"])
+    if draw_base is not None:
+        # Explicit override — use default scale
+        ph, pd_, pa = _three_way_probs(elo_diff, draw_base, _DEFAULT_SCALE)
+    else:
+        params = _load_draw_params()
+        if params is not None:
+            ph, pd_, pa = _three_way_probs(elo_diff, params["draw_base"], params["scale"])
+        else:
+            ph, pd_, pa = _three_way_probs(elo_diff, _DEFAULT_DRAW_BASE, _DEFAULT_SCALE)
 
-    # --- Fallback: original exponential draw-rate model ---------------------
-    p_home_2way = expected_score(elo_home + adv, elo_away)
-    gap = abs(elo_diff)
-    draw = draw_base * math.exp(-gap / 400.0)
-    home = (1 - draw) * p_home_2way
-    away = (1 - draw) * (1 - p_home_2way)
-    total = home + draw + away
-    return {"home": home / total, "draw": draw / total, "away": away / total}
+    return {"home": ph, "draw": pd_, "away": pa}
 
 
 def win_prob_knockout(elo_a: float, elo_b: float) -> float:
@@ -306,17 +252,18 @@ if __name__ == "__main__":
     print("Loading match history…")
     matches = load_results()
 
-    print("\nFitting Dixon-Coles parameters…")
-    params = fit_dc_params(matches)
+    print("\nFitting draw model parameters…")
+    params = fit_draw_params(matches)
 
-    avg_g = math.exp(params["mu_0"])
-    print(f"\n  μ₀   = {params['mu_0']:.4f}  → avg goals/team/match = {avg_g:.3f}")
-    print(f"  γ    = {params['gamma']:.6f}  (Elo→goal-rate sensitivity)")
-    print(f"  ρ    = {params['rho']:.4f}  (low-score correlation; <0 = more 0-0 than Poisson)")
-    print(f"  n    = {params['n_matches']:,} competitive matches used for fitting")
+    print(f"\n  draw_base = {params['draw_base']:.4f}  "
+          f"(P(draw) at equal strength on neutral ground)")
+    print(f"  scale     = {params['scale']:.1f}  "
+          f"(Elo points for draw prob to fall to draw_base/e ≈ {params['draw_base']/math.e:.3f})")
+    print(f"  n_matches = {params['n_matches']:,}  competitive matches used")
 
-    print("\nSample predictions (DC model):")
-    print(f"  Equal teams, neutral:        {match_probs(1500, 1500)}")
-    print(f"  +200 Elo favourite, neutral: {match_probs(1600, 1400)}")
-    print(f"  +400 Elo favourite, neutral: {match_probs(1700, 1300)}")
-    print(f"\n  Knockout P(+200 fav advances): {win_prob_knockout(1600, 1400):.3f}")
+    print("\nSample predictions (calibrated draw model):")
+    for diff in [0, 50, 100, 200]:
+        p = match_probs(1500 + diff // 2, 1500 - diff // 2)
+        print(f"  Δelo={diff:+4d}: home={p['home']:.3f}  draw={p['draw']:.3f}  away={p['away']:.3f}")
+    print(f"\n  Knockout P(+200-Elo fav advances): "
+          f"{win_prob_knockout(1600, 1400):.3f}")
