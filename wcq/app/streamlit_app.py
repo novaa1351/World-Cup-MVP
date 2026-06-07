@@ -20,6 +20,7 @@ import config
 from src.data.historical import download_results, load_results
 from src.data.markets import get_all, winner_probs, kalshi_survival_probs
 from src.models.elo import compute_elo, top_n
+from src.models.match_model import dc_params_available, fit_dc_params
 from src.models.tournament import simulate_tournament, survival_table, GROUPS_2026, MARKET_TO_FIFA
 from src.models.svi_surface import SurvivalSurface
 from src.markets.implied import implied_from_book
@@ -55,6 +56,33 @@ def load_backtest(year: int) -> dict:
 
 st.title("⚽ World Cup Quant Dashboard")
 st.caption("Model vs. prediction markets · educational tool, not betting advice")
+
+# Sidebar: model status
+with st.sidebar:
+    st.header("Model info")
+    if dc_params_available():
+        import json
+        with open(config.DC_PARAMS_PATH) as _f:
+            _p = json.load(_f)
+        st.success("Dixon-Coles (DC) model active")
+        st.caption(
+            f"μ₀={_p['mu_0']:.3f} · γ={_p['gamma']:.5f} · ρ={_p['rho']:.3f}"
+            f"\nFit on {_p.get('n_matches', '?'):,} matches"
+        )
+    else:
+        st.warning("DC params not fitted — using fallback model")
+        st.caption("Run once to fit:")
+        st.code("python src/models/match_model.py")
+        if st.button("Fit DC parameters now (≈30 s)"):
+            with st.spinner("Fitting Dixon-Coles parameters…"):
+                _matches = load_results()
+                fit_dc_params(_matches)
+            st.success("Done! Reload the page to use the DC model.")
+    st.divider()
+    st.caption(
+        "Elo: tournament K-weighted (eloratings.net) "
+        "+ 20 % annual mean-reversion (FiveThirtyEight)."
+    )
 
 elo = load_elo()
 markets = load_markets()
