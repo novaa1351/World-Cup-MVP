@@ -416,16 +416,16 @@ with tab_bt:
                       else ("draw" if r.home_score == r.away_score else "✓ away"))),
         axis=1,
     )
-    display["model called"] = display.apply(
-        lambda r: ("home" if r["P(home win)"] >= r[["P(draw)", "P(away win)"]].max()
-                   and r["P(home win)"] >= r["P(draw)"]
-                   else ("draw" if r["P(draw)"] >= r["P(away win)"] else "away")),
+    # Draw is structurally never the argmax — P(draw) ≤ min(P(home), P(away))
+    # at all Elo differences. "Favourite" just shows which side the model leans.
+    display["favourite"] = display.apply(
+        lambda r: "home" if r["P(home win)"] >= r["P(away win)"] else "away",
         axis=1,
     )
 
     st.dataframe(
         display[["date", "home", "away", "elo_home", "elo_away",
-                 "P(home win)", "P(draw)", "P(away win)", "result", "model called"]]
+                 "P(home win)", "P(draw)", "P(away win)", "result", "favourite"]]
         .sort_values("date")
         .style.format({
             "elo_home": "{:.0f}", "elo_away": "{:.0f}",
