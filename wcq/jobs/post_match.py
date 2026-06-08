@@ -14,7 +14,7 @@ Env vars required:
 
 Optional:
   DRY_RUN=1
-  FOOTBALL_DATA_API_KEY      (enables football-data.org source)
+  API_FOOTBALL_KEY      (enables football-data.org source)
 """
 from __future__ import annotations
 import sys

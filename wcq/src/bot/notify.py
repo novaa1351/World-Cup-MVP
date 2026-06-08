@@ -331,7 +331,6 @@ def post_post_match_scorecard(
         description=result_str,
         color=color,
         fields=fields,
-        footer="The calibration scoreboard is the real test — we report honestly when the model trails.",
     )
     _post({"embeds": [embed]}, webhook_url, dry_run)
 

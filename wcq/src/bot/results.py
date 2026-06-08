@@ -22,11 +22,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import requests
 
-FOOTBALL_DATA_KEY: str = os.environ.get("FOOTBALL_DATA_API_KEY", "")
-_FDORG_BASE = "https://api.football-data.org/v4"
+API_FOOTBALL_KEY: str = os.environ.get("API_FOOTBALL_KEY", "")
 
-# football-data.org WC 2026 competition code (confirm at tournament start)
-_WC_COMPETITION = "WC"
+# API-Football (api-football.com / apisports) — direct endpoint, no RapidAPI middleware.
+# If you're on RapidAPI instead, swap the base URL and headers in _result_from_api_football.
+_APIFOOTBALL_BASE = "https://v3.football.api-sports.io"
+
+# FIFA World Cup 2026 league ID in API-Football.
+# Historically the men's WC is league_id=1; confirm at https://www.api-football.com/documentation-v3
+_WC_LEAGUE_ID = 1
+_WC_SEASON = 2026
 
 
 # ---------------------------------------------------------------------------
@@ -72,69 +77,76 @@ def _outcome_from_polymarket_resolution(
 
 
 # ---------------------------------------------------------------------------
-# Source 2: football-data.org
+# Source 2: API-Football (api-football.com / apisports direct)
 # ---------------------------------------------------------------------------
 
-def _result_from_football_data(
+def _result_from_api_football(
     home: str,
     away: str,
     kickoff_utc: str,
 ) -> dict | None:
-    """Fetch result from football-data.org.
+    """Fetch result from API-Football (api-football.com).
 
-    Requires FOOTBALL_DATA_API_KEY. Free tier: ~10 req/min, covers WC.
+    Requires API_FOOTBALL_KEY env var. Free tier: 100 req/day, covers WC.
+    Uses the direct apisports endpoint — if you're on RapidAPI instead,
+    change the base URL to https://api-football-v1.p.rapidapi.com/v3 and
+    headers to {"X-RapidAPI-Key": key, "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"}.
     """
-    if not FOOTBALL_DATA_KEY:
+    if not API_FOOTBALL_KEY:
         return None
 
-    date_str = kickoff_utc[:10]
+    date_str = kickoff_utc[:10]  # YYYY-MM-DD
     try:
         r = requests.get(
-            f"{_FDORG_BASE}/competitions/{_WC_COMPETITION}/matches",
-            headers={"X-Auth-Token": FOOTBALL_DATA_KEY},
-            params={"dateFrom": date_str, "dateTo": date_str},
+            f"{_APIFOOTBALL_BASE}/fixtures",
+            headers={"x-apisports-key": API_FOOTBALL_KEY},
+            params={"league": _WC_LEAGUE_ID, "season": _WC_SEASON, "date": date_str},
             timeout=15,
         )
         r.raise_for_status()
-        matches = r.json().get("matches", [])
+        fixtures = r.json().get("response", [])
     except Exception as e:
-        print(f"[results] football-data.org: {e}")
+        print(f"[results] API-Football: {e}")
         return None
 
-    home_l = home.lower()
-    away_l = away.lower()
+    home_words = [w.lower() for w in home.split() if len(w) > 2]
+    away_words = [w.lower() for w in away.split() if len(w) > 2]
 
-    for m in matches:
-        ht = str(m.get("homeTeam", {}).get("name", "") or m.get("homeTeam", {}).get("shortName", "")).lower()
-        at = str(m.get("awayTeam", {}).get("name", "") or m.get("awayTeam", {}).get("shortName", "")).lower()
+    for fix in fixtures:
+        teams = fix.get("teams", {})
+        ht = str(teams.get("home", {}).get("name", "")).lower()
+        at = str(teams.get("away", {}).get("name", "")).lower()
 
-        # Loose name match (handles spelling differences)
-        home_words = [w for w in home_l.split() if len(w) > 2]
-        away_words = [w for w in away_l.split() if len(w) > 2]
+        # Loose name match handles API-Football spelling differences
         if not (any(w in ht for w in home_words) and any(w in at for w in away_words)):
             continue
 
-        status = m.get("status", "")
-        if status not in ("FINISHED", "AWARDED"):
-            return None  # match not finished yet
+        status_short = fix.get("fixture", {}).get("status", {}).get("short", "")
+        if status_short not in ("FT", "AET", "PEN"):
+            return None  # not finished yet (FT=full time, AET=after extra time, PEN=penalties)
 
-        score = m.get("score", {})
-        full = score.get("fullTime", score.get("regularTime", {}))
-        hs = full.get("home") if full else None
-        as_ = full.get("away") if full else None
+        goals = fix.get("goals", {})
+        hs = goals.get("home")
+        as_ = goals.get("away")
+        if hs is None or as_ is None:
+            # Fall back to score.fulltime
+            ft = fix.get("score", {}).get("fulltime", {})
+            hs, as_ = ft.get("home"), ft.get("away")
         if hs is None or as_ is None:
             return None
 
-        winner_map = {"HOME_TEAM": "home", "AWAY_TEAM": "away", "DRAW": "draw"}
-        winner = winner_map.get(score.get("winner", ""), None)
-        if winner is None:
+        # For knockout rounds resolved by penalties, the score stays at the
+        # AET result — the team that won on pens has teams[home/away].winner=true
+        if status_short == "PEN":
+            winner = "home" if teams.get("home", {}).get("winner") else "away"
+        else:
             winner = "home" if hs > as_ else ("away" if as_ > hs else "draw")
 
         return {
             "home_score": int(hs),
             "away_score": int(as_),
             "winner": winner,
-            "source": "football-data.org",
+            "source": "api-football",
         }
     return None
 
@@ -207,8 +219,8 @@ def fetch_result(
         if r:
             return r
 
-    if use_football_data and FOOTBALL_DATA_KEY:
-        r = _result_from_football_data(home, away, kickoff_utc)
+    if use_football_data and API_FOOTBALL_KEY:
+        r = _result_from_api_football(home, away, kickoff_utc)
         if r:
             return r
 

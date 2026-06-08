@@ -13,7 +13,7 @@ Env vars required:
 
 Optional:
   DRY_RUN=1
-  FOOTBALL_DATA_API_KEY
+  API_FOOTBALL_KEY
   WCQ_KELLY_EDGE_THRESHOLD (default 0.03)
 """
 from __future__ import annotations

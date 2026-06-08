@@ -40,7 +40,7 @@ jobs:
           DISCORD_WEBHOOK_URL:   ${{ secrets.DISCORD_WEBHOOK_URL }}
           WCQ_DB_PATH:           ${{ secrets.WCQ_DB_PATH || 'wcq_bot.db' }}
           WCQ_SCHEDULE_PATH:     data/schedule_2026.json
-          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           # DRY_RUN: "1"
 
       - name: Commit updated DB back to repo
