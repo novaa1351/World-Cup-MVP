@@ -10,7 +10,7 @@ generates independent model probabilities from historical match data, and surfac
 where the two disagree (value edges, arbitrage). Educational/analytical only —
 no actual trading.
 
-## Architecture: two tracks converging
+## Architecture
 
 ```
 results.csv (50k matches)          Polymarket / Kalshi (live odds)
@@ -21,7 +21,7 @@ elo.py (team ratings)              implied.py (de-vig → clean probs)
      ↓                                      ↓
 match_model.py (win/draw/loss)             |
      ↓                                      |
-[tournament.py -- NOT BUILT YET]           |
+tournament.py (MC bracket sim)             |
      ↓                                      |
 svi_surface.py (survival curves)           |
      ↓_____________________________________|
@@ -33,15 +33,57 @@ svi_surface.py (survival curves)           |
 Supporting files: `config.py` (shared settings/paths, no dependencies),
 `backtest/engine.py` (staking sim), `viz/charts.py` (plotly charts).
 
-## Key gap right now
+## Current state (as of end of June 7 2026 session)
 
-`tournament.py` does not exist yet. It is the missing link: takes match
-probabilities from match_model.py, simulates the 48-team 2026 bracket via
-Monte Carlo, and outputs per-team survival probabilities per round. Those
-probabilities become the anchors fed to `svi_surface.py`.
+Everything in the architecture above is **built and wired**. The dashboard has
+six tabs and is fully functional:
 
-Until tournament.py is built, the edge tab in the dashboard uses placeholder
-probabilities (model_p == market_p), so it shows zero edge.
+| Tab | Contents |
+|-----|----------|
+| Live markets | Raw Polymarket + Kalshi prices; pivot table of Kalshi round survival prices |
+| Model forecast | Top-20 Elo ratings; MC survival probability table; group tables |
+| Edge detection | Polymarket champion edges (bar chart, scatter); Kalshi round-survival edges with correct round-label remapping |
+| Survival surface | SVI-style survival curves per team |
+| Backtest | Six historical WC backtests (2002–2022); per-match predictions table; **2026 forward simulation** (NOT a backtest — uses live Kalshi prices + MC paths, shows bankroll distribution histogram) |
+| Findings | Six-WC Brier/hit-rate summary chart; 5 key findings; per-year table; expected 2026 knockout bracket diagram |
+
+## Key model details
+
+- **Elo**: trained on all matches from 1872 → present; 5 % annual mean-reversion;
+  5-tier tournament K-weighting (WC finals K=60, qualifiers K=40, friendlies K=20)
+- **Draw model**: `P(draw|Δelo) = draw_base × exp(-|Δelo|/scale)`, MLE-fitted:
+  draw_base=0.3131, scale=318.2; params stored in `data/draw_params.json`
+- **Monte Carlo**: 20 000 simulations of 48-team 2026 bracket (configurable in sidebar)
+- **Calibrated draw params** live in `data/draw_params.json`; if missing, sidebar shows
+  a calibration button that re-fits and writes the file (~5 s)
+
+## Kalshi round label mapping (critical — gets it wrong if missed)
+
+Kalshi asks "Will X **qualify for** [Round]?" which means the team **reaches** that
+round. Our model labels refer to the round a team **wins**. The off-by-one:
+
+| Kalshi market | Model key (mc_survival) | Sim dict key |
+|---------------|------------------------|-------------|
+| R16           | R32                    | R32         |
+| QF            | R16                    | R16         |
+| SF            | QF                     | QF          |
+| final         | final (= SF value)     | SF          |
+
+This mapping is defined as `_KALSHI_TO_MODEL_ROUND` in the edge tab and
+`_FWDMAP_MC` / `_FWDMAP_SIM` in the backtest forward-simulation section.
+
+## Forward simulation design (new as of Jun 7)
+
+`run_forward_simulation()` in `streamlit_app.py` (cached) replicates the full
+tournament.py simulation loop but returns per-sim outcomes:
+  `list[{"R32": set[str], "R16": set[str], "QF": set[str], "SF": set[str], "champion": str}]`
+
+The UI section in the Backtest tab then:
+1. Fetches live Kalshi prices, applies the round-label remapping
+2. Filters bets above the edge threshold
+3. For each simulation path, applies Kelly staking round-by-round (all bets within
+   a round sized from the start-of-round bankroll simultaneously)
+4. Shows a histogram of 1K–20K final bankrolls + median / percentile / P(profit) metrics
 
 ## SVI framing — say this clearly in comments and docstrings
 
@@ -55,8 +97,6 @@ The mapping:
   - Implied-vol surface value  → P(team survives to that round)
   - Calendar no-arbitrage      → survival monotone non-increasing in round depth
   - Butterfly no-arbitrage     → per-round probs form a valid distribution
-
-Be honest about this distinction in any comments or docs you write.
 
 ## Code style
 
@@ -89,16 +129,19 @@ streamlit run app/streamlit_app.py # launch dashboard
 
 ## What to build next (priority order)
 
-1. `src/models/tournament.py` — Monte Carlo bracket sim, 48 teams, 12 groups of 4,
-   2026 format (top 2 + 8 best thirds → R32). Output: dict[team → dict[round → float]].
-2. Wire tournament output → SurvivalSurface anchors → edge tab real probabilities.
-3. Dixon-Coles bivariate-Poisson upgrade for match_model.py (better draw rate).
-4. Calibration/reliability diagram in backtest/ using resolved 2018/2022 data.
-5. Recent-form time-decay weighting in elo.py.
-
-## 2026 World Cup format
-
-48 teams, 12 groups (A–L) of 4 teams each. Top 2 from each group advance directly.
-8 best third-placed teams also advance. Total of 32 teams in Round of 32.
-Standard knockout (R32 → R16 → QF → SF → Final → Champion) from there.
-`config.py` defines: ROUNDS = ["group", "R32", "R16", "QF", "SF", "final", "champion"]
+1. **Forward simulation UX improvements** — currently the histogram can show
+   extreme right-tail outliers (Kelly compounding artifact) that compress the
+   useful range. Consider log-scale x-axis toggle, or capping display at 99th
+   percentile with a note.
+2. **Group-stage betting** — Kalshi only covers knockout rounds; Polymarket may
+   have group-stage markets. Could add group-winner / top-2 markets to the
+   forward sim if data is available.
+3. **Per-bet attribution** — in the forward sim, show which individual bets
+   contributed most to the P&L distribution (useful for understanding model
+   conviction vs noise).
+4. **Recent-form time-decay weighting** in `elo.py` — matches from the last
+   12 months get a higher weight multiplier. Would improve accuracy for teams
+   that have changed dramatically in form.
+5. **Smoke tests** — `tests/test_smoke.py` exists but may not cover the new
+   forward simulation code path. Add a fast test (100 sims) that checks return
+   shape and round-set sizes.
