@@ -1,0 +1,56 @@
+name: WC Pre-Match Briefing
+
+# Runs every 30 minutes. Each run checks whether a fixture kicks off in
+# 45–90 minutes (UTC). If one is found and not yet briefed, posts the embed.
+# 30-minute cadence ensures we never miss the window even if a run is slow.
+#
+# Active UTC hours during the tournament:
+#   Group-stage kickoffs: typically 18:00, 21:00, 00:00 UTC
+#   Matching window triggers would fire at: 17:00/17:30, 20:00/20:30, 23:00/23:30
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  pre-match:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: wcq
+
+    steps:
+      - name: Checkout repo (with db file)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: wcq/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pre-match briefing
+        run: python jobs/pre_match.py
+        env:
+          DISCORD_WEBHOOK_URL:      ${{ secrets.DISCORD_WEBHOOK_URL }}
+          WCQ_DB_PATH:              ${{ secrets.WCQ_DB_PATH || 'wcq_bot.db' }}
+          WCQ_SCHEDULE_PATH:        data/schedule_2026.json
+          WCQ_KELLY_EDGE_THRESHOLD: ${{ vars.WCQ_KELLY_EDGE_THRESHOLD || '0.03' }}
+          FOOTBALL_DATA_API_KEY:    ${{ secrets.FOOTBALL_DATA_API_KEY }}
+          # DRY_RUN: "1"
+
+      - name: Commit updated DB back to repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f wcq_bot.db 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "chore: pre-match DB update [skip ci]"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
