@@ -14,7 +14,7 @@ Two targets, each independently operational:
 | `WCQ_DB_PATH` | No | `wcq_bot.db` | Path to the SQLite file |
 | `WCQ_SCHEDULE_PATH` | No | `data/schedule_2026.json` | Path to the match schedule cache |
 | `WCQ_MARKET_CACHE_PATH` | No | `data/market_cache.json` | Polymarket/Kalshi discovery cache |
-| `FOOTBALL_DATA_API_KEY` | Recommended | — | football-data.org free tier key |
+| `API_FOOTBALL_KEY` | Recommended | — | football-data.org free tier key |
 | `DRY_RUN` | No | `0` | Set to `1` to print embeds without posting |
 | `POLL_INTERVAL` | No | `75` | Seconds between live polls (Railway only) |
 | `EDGE_THRESHOLD` | No | `0.06` | Minimum model vs market edge to alert |
@@ -45,7 +45,7 @@ Add these **Repository secrets**:
 | Secret name | Value |
 |---|---|
 | `DISCORD_WEBHOOK_URL` | Your Discord server webhook URL |
-| `FOOTBALL_DATA_API_KEY` | Key from football-data.org (free registration) |
+| `API_FOOTBALL_KEY` | Key from football-data.org (free registration) |
 
 Optionally add as a **Repository variable** (not secret):
 
@@ -133,7 +133,7 @@ In Railway → your service → **Volumes**:
 Also mount the schedule file:
 - Set `WCQ_SCHEDULE_PATH` to `/data/schedule_2026.json`
 - On first deploy, copy `data/schedule_2026.json` to the volume by running a
-  one-off command in the Railway shell: `cp /app/wcq/data/schedule_2026.json /data/`
+  one-off command in the Railway shell: `cp /app/data/schedule_2026.json /data/`
 
 ### Step 3 — Set environment variables in Railway
 
@@ -143,7 +143,7 @@ In Railway → your service → **Variables**, add:
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 WCQ_DB_PATH=/data/wcq_bot.db
 WCQ_SCHEDULE_PATH=/data/schedule_2026.json
-FOOTBALL_DATA_API_KEY=your_key_here
+API_FOOTBALL_KEY=your_key_here
 POLL_INTERVAL=75
 EDGE_THRESHOLD=0.06
 PRICE_MOVE_THRESHOLD=0.05
@@ -187,7 +187,7 @@ via **Deployments** → click the latest → check logs for:
 - Run `python src/bot/fixtures.py --download` locally and commit the resulting
   `data/schedule_2026.json`.
 
-**`FOOTBALL_DATA_API_KEY` rate limit:**
+**`API_FOOTBALL_KEY` rate limit:**
 - The free tier allows ~10 req/min. The post-match job runs every 30 minutes and
   makes at most a handful of requests per run, so limits should not be an issue.
   If they are, increase `_RESULT_WINDOW_MIN` in `post_match.py` to widen the window.
