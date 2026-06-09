@@ -433,10 +433,10 @@ async def main() -> None:
         log.info("TEST_ALERT=1 — firing test embed to Discord")
         from src.bot.notify import post_live_edge_alert
         post_live_edge_alert(
-            home="Brazil", away="Germany",
+            home_team="Brazil", away_team="Germany",
             outcome="home", edge=0.09,
             model_prob=0.57, market_prob=0.48,
-            platform="Polymarket",
+            platform="Polymarket", trigger="test",
         )
         log.info("TEST_ALERT sent — remove TEST_ALERT env var to disable")
 
