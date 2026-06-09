@@ -10,6 +10,8 @@ on:
 jobs:
   daily-digest:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: wcq
@@ -18,8 +20,8 @@ jobs:
       - name: Checkout repo (with db file)
         uses: actions/checkout@v4
         with:
-          # Fetch full history so the Elo computation has the martj42 CSV cached
           fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
