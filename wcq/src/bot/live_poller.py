@@ -429,6 +429,17 @@ async def main() -> None:
              POLL_INTERVAL, EDGE_THRESHOLD * 100)
     log.info("Schedule path: %s  exists=%s", schedule_path, Path(schedule_path).exists())
 
+    if os.environ.get("TEST_ALERT", "0") == "1":
+        log.info("TEST_ALERT=1 — firing test embed to Discord")
+        from src.bot.notify import post_live_edge_alert
+        post_live_edge_alert(
+            home="Brazil", away="Germany",
+            outcome="home", edge=0.09,
+            model_prob=0.57, market_prob=0.48,
+            platform="Polymarket",
+        )
+        log.info("TEST_ALERT sent — remove TEST_ALERT env var to disable")
+
     active_tasks: dict[str, asyncio.Task] = {}  # match_id -> task
 
     while True:
