@@ -38,6 +38,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Download historical match data
+        run: python src/data/historical.py
+
       - name: Run pre-match briefing
         run: python jobs/pre_match.py
         env:

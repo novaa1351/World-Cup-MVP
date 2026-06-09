@@ -39,6 +39,9 @@ jobs:
         env:
           WCQ_SCHEDULE_PATH: data/schedule_2026.json
 
+      - name: Download historical match data
+        run: python src/data/historical.py
+
       - name: Run daily digest
         run: python jobs/daily_digest.py
         env:
