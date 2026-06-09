@@ -424,8 +424,10 @@ def _parse_poly_outcome_prices(
 async def main() -> None:
     """Outer loop: refresh active matches every 60s, manage polling tasks."""
     init_db()
+    schedule_path = os.environ.get("WCQ_SCHEDULE_PATH", "data/schedule_2026.json")
     log.info("Live poller started (poll_interval=%ds, edge_threshold=%.0f%%)",
              POLL_INTERVAL, EDGE_THRESHOLD * 100)
+    log.info("Schedule path: %s  exists=%s", schedule_path, Path(schedule_path).exists())
 
     active_tasks: dict[str, asyncio.Task] = {}  # match_id -> task
 
