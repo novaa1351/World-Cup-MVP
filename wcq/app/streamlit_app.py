@@ -29,7 +29,7 @@ from src.markets.edges import edge_table, flag_value, kelly_fraction
 from src.backtest.engine import run_wc_backtest, WC_CUTOFFS
 from src.viz import charts
 
-st.set_page_config(page_title="World Cup Quant Dashboard", layout="wide")
+st.set_page_config(page_title="World Cup Model vs Market Dashboard", layout="wide")
 
 
 @st.cache_data(show_spinner="Loading match history + computing Elo...")
@@ -261,7 +261,7 @@ _SIM_OPTIONS = {"Fast — 5 k": 5_000, "Standard — 20 k": 20_000}
 
 with st.sidebar:
     st.header("Model configuration")
-    st.caption("Switch configs to see how the forecast changes — each uses a different Elo and draw model. Results are cached per combination.")
+    st.caption("Switch configs to see how the forecast changes as each uses a different Elo and draw model. Results are cached per combination.")
 
     _preset_name = st.radio(
         "Match model",
@@ -467,7 +467,7 @@ with tab_edge:
         # ── Section 2: Kalshi round-survival edges ────────────────────────────
         st.markdown("### Kalshi — round survival edges (KXWCROUND)")
         st.caption(
-            "Kalshi markets ask 'Will X **qualify for** [Round]?' — meaning the team *reaches* "
+            "Kalshi markets ask 'Will X **qualify for** [Round]?', meaning the team *reaches* "
             "that round. Our model round labels refer to the round a team *wins*. "
             "The mapping applied here: Kalshi R16 → model R32 (P win R32 match), "
             "Kalshi QF → model R16, Kalshi SF → model QF, Kalshi Final → model SF/final."
@@ -578,7 +578,7 @@ with tab_bt:
     st.subheader("Historical World Cup backtest")
     st.caption(
         "Elo ratings are rebuilt from scratch using only matches played **before** "
-        "the selected World Cup started — zero lookahead bias. "
+        "the selected World Cup started with zero lookahead bias. "
         "The model's match probabilities are then compared against the 64 actual "
         "results. Market baseline = 1/3 flat (equal-odds for each 3-way outcome), "
         "since archived betting odds are unavailable. "
@@ -683,7 +683,7 @@ with tab_bt:
         "**Not a historical backtest.** The 2002–2022 sections above evaluate the model "
         "against known outcomes. This section runs the same Kelly-staking strategy "
         "*forward*, using live Kalshi prices and Monte Carlo tournament paths. "
-        "The output is a distribution of possible final bankrolls across simulations — "
+        "The output is a distribution of possible final bankrolls across simulations in "
         "a probabilistic range, not a profit forecast. Educational only."
     )
 
@@ -844,7 +844,7 @@ with tab_findings:
     st.markdown("### Backtesting performance — six World Cups (2002–2022)")
     st.caption(
         "Each World Cup is a fully held-out test set. Elo ratings are rebuilt from "
-        "scratch using only matches played **before** that tournament — zero lookahead. "
+        "scratch using only matches played **before** that tournament with zero lookahead. "
         "The naïve baseline assigns equal 1/3 probability to every 3-way outcome."
     )
 
@@ -883,21 +883,21 @@ with tab_findings:
 **1. Consistent calibration across eras**
 The model achieves a mean Brier score of {avg_brier:.4f} across six World Cups,
 outperforming the naïve equal-odds baseline in {beat_baseline} of 6 tournaments.
-The sole exception — 2002 — coincides with the most historically anomalous World Cup
+The sole exception being 2002, coincides with the most historically anomalous World Cup
 on record: South Korea reaching the semi-finals, Senegal eliminating the defending
 champion France, and Turkey finishing third from a cold Elo starting point.
 
 **2. Hit rate is the operative signal**
-Brier score conflates calibration error with outcome surprise. For edge detection —
-the actual use case — the hit rate on bets placed above a 5 pp threshold is the
+Brier score conflates calibration error with outcome surprise. For edge detection ()
+the actual use case) the hit rate on bets placed above a 5 pp threshold is the
 cleaner metric. The model delivers {min_hit:.1%}–{max_hit:.1%} across six WCs,
 indicating that the *relative ranking* of outcome probabilities is robust even
 when absolute calibration fluctuates in a 64-match sample.
 
 **3. Draw model: calibration matters**
 Maximum-likelihood estimation on 21,447 competitive matches (1990–present) yields
-`draw_base = 0.313` — significantly higher than the conventional 0.28 assumption —
-and a faster decay constant (`scale = 318` vs 400). Draws are structurally more
+`draw_base = 0.313` which is significantly higher than the conventional 0.28 assumption
+and is accompanied by a faster decay constant (`scale = 318` vs 400). Draws are structurally more
 likely at equal Elo strength than the literature assumes, but Elo differentiation
 compresses that advantage more quickly than a simple exponential with scale = 400
 would suggest.
@@ -912,7 +912,7 @@ underconfident on elite-vs-elite ties.
 **5. Tournament K-weighting improves signal fidelity**
 Applying a five-tier K-factor scale (WC finals K = 60, qualifiers K = 40,
 friendlies K = 20) improves Brier score by 3–5 pp relative to flat K = 40.
-World Cup results carry more information per game than qualifiers — weighting
+World Cup results carry more information per game than qualifiers, thus weighting
 them more heavily in Elo updates is empirically justified.
 """)
 
@@ -953,9 +953,7 @@ them more heavily in Elo updates is empirically justified.
         "Teams are seeded by Elo rating within each group (highest Elo = expected group winner, "
         "second = runner-up, best 8 third-placed by Elo fill the remaining R32 slots). "
         "Each match shows the two expected opponents with their head-to-head win probability "
-        "from the draw-adjusted model. The blue shade of winner boxes deepens with MC champion "
-        "probability. The 🏆 figure beneath each winner's name is from the full "
-        f"{_n_sims:,}-simulation run, not the deterministic bracket path."
+        "from the draw-adjusted model."
     )
 
     rounds_data, champion_team = build_bracket(tuple(sorted(elo.items())), _db, _sc)

@@ -1,14 +1,16 @@
 """Post rich Discord embeds via webhook.
 
 Config (all from environment — never hardcoded):
-  DISCORD_WEBHOOK_URL  — webhook target
-  DRY_RUN              — set to "1" to print payloads instead of posting
+  DISCORD_WEBHOOK_URL        — fallback webhook used when a channel-specific var is unset
+  DISCORD_WEBHOOK_DIGEST     — #daily-digest channel
+  DISCORD_WEBHOOK_PRE_MATCH  — #pre-match channel
+  DISCORD_WEBHOOK_POST_MATCH — #post-match channel
+  DISCORD_WEBHOOK_PAPER      — #paper-trading channel
+  DISCORD_WEBHOOK_LIVE       — #live-alerts channel
+  DRY_RUN                    — set to "1" to print payloads instead of posting
 
-Usage:
-    from src.bot.notify import post_daily_digest, post_pre_match_briefing, ...
-
-Each public function accepts optional webhook_url and dry_run overrides for
-testing individual embeds from the command line.
+If only DISCORD_WEBHOOK_URL is set, all notifications go to that one channel.
+Set the channel-specific vars to route each type to its own channel.
 """
 from __future__ import annotations
 import json
@@ -24,6 +26,31 @@ import requests
 
 WEBHOOK_URL: str = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DRY_RUN: bool = os.environ.get("DRY_RUN", "0").strip().lower() in ("1", "true", "yes")
+
+# Per-channel webhooks — each falls back to WEBHOOK_URL if unset
+_WH_DIGEST     = os.environ.get("DISCORD_WEBHOOK_DIGEST",     WEBHOOK_URL)
+_WH_PRE_MATCH  = os.environ.get("DISCORD_WEBHOOK_PRE_MATCH",  WEBHOOK_URL)
+_WH_POST_MATCH = os.environ.get("DISCORD_WEBHOOK_POST_MATCH", WEBHOOK_URL)
+_WH_PAPER      = os.environ.get("DISCORD_WEBHOOK_PAPER",      WEBHOOK_URL)
+_WH_LIVE       = os.environ.get("DISCORD_WEBHOOK_LIVE",       WEBHOOK_URL)
+
+# Per-channel role IDs — set to ping a role when each notification posts.
+# Get IDs from Discord: Server Settings → Roles → right-click role → Copy Role ID
+# (requires Developer Mode: User Settings → Advanced → Developer Mode)
+_ROLE_DIGEST     = os.environ.get("DISCORD_ROLE_DIGEST",     "")
+_ROLE_PRE_MATCH  = os.environ.get("DISCORD_ROLE_PRE_MATCH",  "")
+_ROLE_POST_MATCH = os.environ.get("DISCORD_ROLE_POST_MATCH", "")
+_ROLE_PAPER      = os.environ.get("DISCORD_ROLE_PAPER",      "")
+_ROLE_LIVE       = os.environ.get("DISCORD_ROLE_LIVE",       "")
+
+# Maps each webhook URL to its role ID so _post() can add the mention automatically
+_WEBHOOK_ROLE: dict[str, str] = {
+    _WH_DIGEST:     _ROLE_DIGEST,
+    _WH_PRE_MATCH:  _ROLE_PRE_MATCH,
+    _WH_POST_MATCH: _ROLE_POST_MATCH,
+    _WH_PAPER:      _ROLE_PAPER,
+    _WH_LIVE:       _ROLE_LIVE,
+}
 
 # Discord embed color palette
 _COL_GREEN  = 0x2ECC71
@@ -41,6 +68,11 @@ def _post(
     dry_run: bool = DRY_RUN,
 ) -> None:
     """POST a Discord payload to the webhook, or print it in dry-run mode."""
+    role_id = _WEBHOOK_ROLE.get(webhook_url, "")
+    if role_id:
+        payload = dict(payload)
+        payload["content"] = f"<@&{role_id}>"
+        payload["allowed_mentions"] = {"parse": [], "roles": [role_id]}
     if dry_run or not webhook_url:
         print("[DRY-RUN] Discord payload:")
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -87,7 +119,7 @@ def _fmt_edge(edge: float) -> str:
 def post_daily_digest(
     fixtures: list[dict],
     top_edges: list[dict],
-    webhook_url: str = WEBHOOK_URL,
+    webhook_url: str = _WH_DIGEST,
     dry_run: bool = DRY_RUN,
 ) -> None:
     """Post today's fixture list with model W/D/L vs market probabilities.
@@ -163,7 +195,7 @@ def post_pre_match_briefing(
     elo_home: float,
     elo_away: float,
     platform: str = "Polymarket",
-    webhook_url: str = WEBHOOK_URL,
+    webhook_url: str = _WH_PRE_MATCH,
     dry_run: bool = DRY_RUN,
 ) -> None:
     """Briefing posted ~1 hour before kickoff.
@@ -257,7 +289,7 @@ def post_post_match_scorecard(
     model_probs: dict[str, float],
     market_probs: dict[str, float] | None,
     calibration: dict,
-    webhook_url: str = WEBHOOK_URL,
+    webhook_url: str = _WH_POST_MATCH,
     dry_run: bool = DRY_RUN,
 ) -> None:
     """Scorecard posted after full time. Calibration scoreboard is the centrepiece."""
@@ -348,7 +380,7 @@ def post_live_edge_alert(
     edge: float,
     platform: str,
     trigger: str,
-    webhook_url: str = WEBHOOK_URL,
+    webhook_url: str = _WH_LIVE,
     dry_run: bool = DRY_RUN,
 ) -> None:
     """Alert for a live edge crossing threshold or a sharp market reprice."""
@@ -374,7 +406,7 @@ def post_cross_platform_spread(
     outcome: str,
     poly_prob: float,
     kalshi_prob: float,
-    webhook_url: str = WEBHOOK_URL,
+    webhook_url: str = _WH_LIVE,
     dry_run: bool = DRY_RUN,
 ) -> None:
     """Alert when Polymarket and Kalshi disagree sharply on the same outcome."""
@@ -404,7 +436,7 @@ def post_paper_bet_placed(
     market_prob: float,
     model_prob: float,
     bankroll: float,
-    webhook_url: str = WEBHOOK_URL,
+    webhook_url: str = _WH_PAPER,
     dry_run: bool = DRY_RUN,
 ) -> None:
     """Notification when a paper bet is placed."""
@@ -426,7 +458,7 @@ def post_paper_bet_placed(
 
 def post_paper_pnl_report(
     summary: dict,
-    webhook_url: str = WEBHOOK_URL,
+    webhook_url: str = _WH_PAPER,
     dry_run: bool = DRY_RUN,
 ) -> None:
     """P&L summary for the paper trading ledger."""
