@@ -19,10 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 from src.data.historical import download_results, load_results
-from src.data.markets import get_all, winner_probs, kalshi_survival_probs
+from src.data.markets import get_all, winner_probs, kalshi_survival_probs, fetch_polymarket_matches
 from src.models.elo import compute_elo, top_n
-from src.models.match_model import draw_params_available, fit_draw_params
-from src.models.tournament import simulate_tournament, survival_table, GROUPS_2026, MARKET_TO_FIFA
+from src.models.match_model import draw_params_available, fit_draw_params, match_probs
+from src.models.tournament import simulate_tournament, survival_table, GROUPS_2026, MARKET_TO_FIFA, _FIFA_TO_HIST
 from src.models.svi_surface import SurvivalSurface
 from src.markets.implied import implied_from_book
 from src.markets.edges import edge_table, flag_value, kelly_fraction
@@ -41,6 +41,11 @@ def load_elo(reversion: float, use_tournament_k: bool) -> dict[str, float]:
 @st.cache_data(show_spinner="Fetching prediction markets...")
 def load_markets() -> pd.DataFrame:
     return get_all()
+
+
+@st.cache_data(show_spinner="Fetching Polymarket match markets…", ttl=300)
+def load_match_markets() -> pd.DataFrame:
+    return fetch_polymarket_matches()
 
 
 @st.cache_data(show_spinner="Running Monte Carlo simulations...")
@@ -537,6 +542,70 @@ with tab_edge:
                     )
             else:
                 st.warning("Could not match Kalshi teams to MC survival dictionary.")
+
+        st.divider()
+
+        # ── Section 3: Polymarket group stage match 3-way edges ──────────────
+        st.markdown("### Polymarket — group stage match 3-way edges")
+        st.caption(
+            "Win / draw / win markets for individual group stage fixtures. "
+            "All WC group games are neutral-venue — no home advantage is applied. "
+            "Green = model sees value (underpriced). Red = market overprices vs model."
+        )
+
+        _match_mkts = load_match_markets()
+        if _match_mkts.empty:
+            st.info("No Polymarket match data available (API may be unavailable).")
+        else:
+            _outcome_map = {"home_win": "home", "draw": "draw", "away_win": "away"}
+            _mrows: list[dict] = []
+            for (_mhome, _maway, _mdate), _grp in _match_mkts.groupby(
+                ["home_team", "away_team", "date"]
+            ):
+                _home_fifa = MARKET_TO_FIFA.get(_mhome, _mhome)
+                _away_fifa = MARKET_TO_FIFA.get(_maway, _maway)
+                _r_home = elo.get(_FIFA_TO_HIST.get(_home_fifa, _home_fifa), config.ELO_BASE)
+                _r_away = elo.get(_FIFA_TO_HIST.get(_away_fifa, _away_fifa), config.ELO_BASE)
+                _model = match_probs(_r_home, _r_away, neutral=True,
+                                     draw_base=_db, scale=_sc)
+                for _, _mr in _grp.iterrows():
+                    _oc  = _mr["outcome"]
+                    _mkt = _mr["price"]
+                    _mod = _model[_outcome_map[_oc]]
+                    _mrows.append({
+                        "Date":      _mdate,
+                        "Match":     f"{_mhome} vs {_maway}",
+                        "Outcome":   _oc.replace("_", " ").title(),
+                        "Model P":   _mod,
+                        "Market P":  _mkt,
+                        "Edge (pp)": _mod - _mkt,
+                        "Kelly f":   kelly_fraction(_mod, _mkt),
+                    })
+
+            if _mrows:
+                _mdf = pd.DataFrame(_mrows).sort_values(
+                    ["Date", "Match", "Outcome"], ignore_index=True
+                )
+                _medge_min = st.slider(
+                    "Minimum edge to show (pp)", -20, 20, -20, key="match_edge_min"
+                ) / 100
+                _mdf_show = _mdf[_mdf["Edge (pp)"] >= _medge_min]
+                st.dataframe(
+                    _mdf_show.style.format({
+                        "Model P": "{:.1%}", "Market P": "{:.1%}",
+                        "Edge (pp)": "{:+.1%}", "Kelly f": "{:.1%}",
+                    }).background_gradient(
+                        subset=["Edge (pp)"], cmap="RdYlGn", vmin=-0.12, vmax=0.12
+                    ),
+                    use_container_width=True,
+                )
+                _n_value = ((_mdf["Edge (pp)"] > 0.05).sum())
+                st.caption(
+                    f"{len(_mdf_show)} rows · "
+                    f"{_n_value} outcomes with model edge > 5 pp across all fixtures"
+                )
+            else:
+                st.info("Match markets loaded but no outcomes could be parsed.")
 
 # --- Survival surface -------------------------------------------------------
 with tab_surf:

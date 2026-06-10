@@ -66,6 +66,7 @@ MARKET_TO_FIFA: dict[str, str] = {
     "Ivory Coast":           "Côte d'Ivoire",
     "Cape Verde":            "Cabo Verde",
     "Turkiye":               "Türkiye",        # Polymarket drops the umlaut
+    "DR Congo":              "Congo DR",       # Polymarket reverses the word order
     # --- Kalshi ---
     "Korea Republic":        "South Korea",    # FIFA/Kalshi official name
     "IR Iran":               "Iran",

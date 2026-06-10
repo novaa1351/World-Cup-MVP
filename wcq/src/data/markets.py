@@ -193,6 +193,93 @@ def fetch_kalshi() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def fetch_polymarket_matches(series_slug: str = "soccer-fifwc") -> pd.DataFrame:
+    """Fetch 3-way (home win / draw / away win) Polymarket markets for WC 2026 matches.
+
+    Uses the Gamma API events endpoint filtered to the FIFA WC series.
+    Skips halftime, spread, total, and any other non-3-way events.
+
+    Returns one row per outcome with columns:
+        platform, event_slug, home_team, away_team, date, outcome, price, market
+    where outcome is one of: 'home_win', 'draw', 'away_win'.
+    """
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        try:
+            r = requests.get(
+                f"{config.POLYMARKET_GAMMA}/events",
+                params={"series_slug": series_slug, "limit": 100,
+                        "active": "true", "closed": "false", "offset": offset},
+                timeout=20,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            print(f"[polymarket_matches] {e}")
+            break
+
+        for event in data:
+            slug  = event.get("slug", "") or ""
+            title = event.get("title", "") or ""
+
+            if not slug.startswith("fifwc"):
+                continue
+            # Keep only full-time W/D/W events; skip halftime, totals, spreads, etc.
+            if any(kw in title for kw in ("Halftime", "More Markets", "Spread", "Total")):
+                continue
+            if not any(m.get("slug", "").endswith("-draw") for m in event.get("markets", [])):
+                continue
+
+            parts = title.split(" vs. ")
+            if len(parts) != 2:
+                continue
+            home_team = parts[0].strip()
+            away_team = parts[1].strip()
+            date = (event.get("eventDate") or event.get("startDate") or "")[:10]
+
+            for market in event.get("markets", []):
+                question = market.get("question", "") or ""
+                try:
+                    prices   = [float(p) for p in json.loads(market.get("outcomePrices", "[]"))]
+                    outcomes = json.loads(market.get("outcomes", "[]"))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if not prices or not outcomes:
+                    continue
+
+                # Identify outcome from question text — more reliable than slug suffix
+                q_lower = question.lower()
+                if "draw" in q_lower:
+                    outcome = "draw"
+                elif home_team.lower() in q_lower:
+                    outcome = "home_win"
+                elif away_team.lower() in q_lower:
+                    outcome = "away_win"
+                else:
+                    continue
+
+                yes_idx = next((i for i, o in enumerate(outcomes) if str(o).lower() == "yes"), 0)
+                price = prices[yes_idx] if yes_idx < len(prices) else prices[0]
+
+                rows.append({
+                    "platform":  "polymarket",
+                    "event_slug": slug,
+                    "home_team":  home_team,
+                    "away_team":  away_team,
+                    "date":       date,
+                    "outcome":    outcome,
+                    "price":      price,
+                    "market":     question,
+                })
+
+        if len(data) < 100:
+            break
+        offset += 100
+
+    return pd.DataFrame(rows)
+
+
 def mock_markets() -> pd.DataFrame:
     """Offline sample so the UI works with no network. Numbers are made up."""
     pm_rows = [
