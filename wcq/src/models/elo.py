@@ -80,6 +80,8 @@ def compute_elo(
     reversion: float = config.ELO_MEAN_REVERSION,
     use_tournament_k: bool = True,
     return_history: bool = False,
+    recent_weight: float = 1.0,      # NEW: >1.0 up-weights recent matches
+    recent_days: int = 365,          # NEW: window defining "recent"
 ) -> "dict[str, float] | tuple[dict[str, float], list]":
     """Replay every match in chronological order and return final Elo ratings.
 
@@ -93,6 +95,11 @@ def compute_elo(
                           (0 = off, 0.2 = 20 % pull per year — FiveThirtyEight
                           uses 0.33 for clubs).
         use_tournament_k: Apply tournament tier K-scaling (eloratings.net).
+        recent_weight:    Multiplier applied to matches within `recent_days`
+                          of the dataset's most recent match (1.0 = off,
+                          no extra weighting; e.g. 1.5 = 50% more weight).
+        recent_days:      Size of the "recent" window in days (default 365,
+                          i.e. the last 12 months).
         return_history:   If True, also return a list of
                           (elo_diff_before_match, home_goals, away_goals)
                           for every match in chronological order. Used by
@@ -104,13 +111,15 @@ def compute_elo(
     """
     sorted_m = matches.sort_values("date").reset_index(drop=True)
     ratings: dict[str, float] = defaultdict(lambda: base)
-    history: list[tuple[float, int, int]] = []  # populated only when requested
+    history: list[tuple[float, int, int]] = []
     last_year: int | None = None
+
+    # NEW: cutoff for "recent" matches, relative to the dataset's own latest date
+    recent_cutoff = sorted_m["date"].max() - pd.Timedelta(days=recent_days)
 
     for row in sorted_m.itertuples(index=False):
         cur_year: int = row.date.year
 
-        # Mean-reversion at each calendar-year boundary
         if reversion > 0 and last_year is not None and cur_year > last_year:
             for team in list(ratings.keys()):
                 ratings[team] += reversion * (base - ratings[team])
@@ -119,13 +128,17 @@ def compute_elo(
         ra: float = ratings[row.home_team]
         rb: float = ratings[row.away_team]
         adv: float = 0.0 if row.neutral else home_adv
-        elo_diff: float = (ra + adv) - rb  # positive = home team favoured
+        elo_diff: float = (ra + adv) - rb
 
         if return_history:
             history.append((elo_diff, int(row.home_score), int(row.away_score)))
 
-        # K-factor for this match
         k_eff = tournament_k(str(row.tournament), k) if use_tournament_k else k
+
+
+        # NEW: apply recency multiplier on top of tournament-tier scaling
+        if row.date >= recent_cutoff:
+            k_eff *= recent_weight
 
         exp_home = expected_score(ra + adv, rb)
         if row.home_score > row.away_score:

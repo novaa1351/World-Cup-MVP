@@ -200,6 +200,15 @@ python src/bot/live_poller.py          # start live poller locally
   explicitly set `permissions: contents: write` to allow DB commits.
 - Railway shell is ephemeral (no volume mount) — use the `startCommand` cp in
   `railway.json` to seed files onto the volume, not the shell.
+- **Elo doesn't fully capture cross-confederation strength gaps.** E.g. Mexico
+  (1860) rated slightly above England (1856) pre-2026 R16 match, which doesn't
+  match conventional rankings — likely because the two rarely share opponents
+  (CONCACAF/Copa América vs UEFA pools). Tried recency-weighting
+  (`recent_weight`/`recent_days` params added to `compute_elo`) to fix this —
+  made the gap *worse* (11.2 pts vs 4.1), since Mexico's recent matches skew
+  toward weaker regional competition. Recency-weighting is implemented and
+  backward-compatible (default off), but doesn't solve the underlying
+  cross-confederation calibration issue — that's a separate, bigger problem.
 
 ## What to build next (priority order)
 
@@ -210,7 +219,9 @@ python src/bot/live_poller.py          # start live poller locally
    have group-stage markets. Could add group-winner / top-2 markets to the forward sim.
 3. **Per-bet attribution** — in the forward sim, show which individual bets
    contributed most to the P&L distribution.
-4. **Recent-form time-decay weighting** in `elo.py` — matches from the last
-   12 months get a higher weight multiplier.
-5. **Smoke tests** — `tests/test_smoke.py` may not cover the forward simulation
-   code path. Add a fast test (100 sims) checking return shape and round-set sizes.
+4. **Cross-confederation Elo calibration** — Mexico/England example showed
+   nearly-equal ratings (1860 vs 1856) despite very different opponent pools
+   (CONCACAF/Copa América vs UEFA). Recency-weighting alone made this worse,
+   not better. Needs some kind of confederation-strength adjustment — worth
+   researching how other rating systems (e.g. eloratings.net) handle this.
+
