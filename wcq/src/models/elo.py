@@ -80,8 +80,10 @@ def compute_elo(
     reversion: float = config.ELO_MEAN_REVERSION,
     use_tournament_k: bool = True,
     return_history: bool = False,
-    recent_weight: float = 1.0,      # NEW: >1.0 up-weights recent matches
-    recent_days: int = 365,          # NEW: window defining "recent"
+    recent_weight: float = 1.0,
+    recent_days: int = 365,
+    current_wc_boost: float = 1.0,
+    current_wc_year: int = 2026,
 ) -> "dict[str, float] | tuple[dict[str, float], list]":
     """Replay every match in chronological order and return final Elo ratings.
 
@@ -100,6 +102,13 @@ def compute_elo(
                           no extra weighting; e.g. 1.5 = 50% more weight).
         recent_days:      Size of the "recent" window in days (default 365,
                           i.e. the last 12 months).
+        current_wc_boost: Extra multiplier applied specifically to matches from
+                          `current_wc_year`'s World Cup, on top of the existing
+                          tier boost (1.0 = off). These are the only matches
+                          that directly connect otherwise-disconnected
+                          confederation rating pools, so they carry unusually
+                          strong signal about cross-confederation strength.
+        current_wc_year:  Year identifying "the current World Cup" (default 2026).
         return_history:   If True, also return a list of
                           (elo_diff_before_match, home_goals, away_goals)
                           for every match in chronological order. Used by
@@ -114,7 +123,6 @@ def compute_elo(
     history: list[tuple[float, int, int]] = []
     last_year: int | None = None
 
-    # NEW: cutoff for "recent" matches, relative to the dataset's own latest date
     recent_cutoff = sorted_m["date"].max() - pd.Timedelta(days=recent_days)
 
     for row in sorted_m.itertuples(index=False):
@@ -135,10 +143,11 @@ def compute_elo(
 
         k_eff = tournament_k(str(row.tournament), k) if use_tournament_k else k
 
-
-        # NEW: apply recency multiplier on top of tournament-tier scaling
         if row.date >= recent_cutoff:
             k_eff *= recent_weight
+
+        if cur_year == current_wc_year and _WC_RE.search(str(row.tournament)):
+            k_eff *= current_wc_boost
 
         exp_home = expected_score(ra + adv, rb)
         if row.home_score > row.away_score:
