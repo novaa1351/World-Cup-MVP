@@ -76,6 +76,13 @@ def main():
 
     print(f"Actual result: Mexico 2-3 England")
 
+    home_adv_pts = 65  # config.ELO_HOME_ADV
+
+    # Full picture: confederation-adjusted ratings, with real (non-neutral) home advantage
+    probs_full = match_probs(mex_adjusted + home_adv_pts, eng_adjusted, neutral=True)
+    print(f"\nModel (offset-adjusted + real home advantage): "
+          f"{probs_full['home']:.0%} / {probs_full['draw']:.0%} / {probs_full['away']:.0%}")
+
 
 if __name__ == "__main__":
     main()
