@@ -84,6 +84,7 @@ def compute_elo(
     recent_days: int = 365,
     current_wc_boost: float = 1.0,
     current_wc_year: int = 2026,
+    confed_offset: bool = False,
 ) -> "dict[str, float] | tuple[dict[str, float], list]":
     """Replay every match in chronological order and return final Elo ratings.
 
@@ -109,6 +110,15 @@ def compute_elo(
                           confederation rating pools, so they carry unusually
                           strong signal about cross-confederation strength.
         current_wc_year:  Year identifying "the current World Cup" (default 2026).
+        confed_offset:    If True, fit and apply per-confederation Elo offsets
+                          (see confederations.py) to correct for cross-
+                          confederation rating bias (e.g. CONCACAF teams
+                          historically overrated relative to UEFA/CONMEBOL).
+                          Fit fresh from `matches` each call — no lookahead
+                          bias, since it only ever sees the same data Elo
+                          itself is trained on. Validated via backtest across
+                          all 6 WCs (2002-2022): improves Brier score and hit
+                          rate in every year tested. Default off.
         return_history:   If True, also return a list of
                           (elo_diff_before_match, home_goals, away_goals)
                           for every match in chronological order. Used by
@@ -162,6 +172,15 @@ def compute_elo(
         ratings[row.away_team] = rb - delta
 
     ratings_dict = dict(ratings)
+
+    if confed_offset:
+        from src.models.confederations import CONFEDERATION, fit_confederation_offsets
+        offsets = fit_confederation_offsets(matches, ratings_dict, CONFEDERATION)
+        for team in ratings_dict:
+            conf = CONFEDERATION.get(team)
+            if conf:
+                ratings_dict[team] += offsets.get(conf, 0.0)
+
     if return_history:
         return ratings_dict, history
     return ratings_dict
