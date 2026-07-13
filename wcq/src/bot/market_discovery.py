@@ -156,50 +156,58 @@ def _cache_set(key: str, data: Any) -> None:
 # Polymarket discovery
 # ---------------------------------------------------------------------------
 
-def _fetch_polymarket_wc_markets(limit: int = 500) -> list[dict]:
-    """Fetch all active Polymarket markets under the world-cup-matches event hub."""
-    cached = _cache_get("poly_wc_markets")
+def _fetch_polymarket_wc_events() -> list[dict]:
+    """Fetch all active WC 2026 W/D/W match events from the Gamma series endpoint.
+
+    Uses series_slug=soccer-fifwc — the confirmed working discovery path.
+    Filters out halftime, spreads, totals, and any non-3-way events.
+    Results are cached for CACHE_TTL_MIN minutes.
+    """
+    cached = _cache_get("poly_wc_events")
     if cached is not None:
         return cached
 
-    markets: list[dict] = []
-
-    # Try the events slug endpoint first
-    try:
-        r = requests.get(
-            _POLY_EVENTS_URL,
-            params={"slug": "world-cup-matches", "limit": 100},
-            timeout=20,
-        )
-        r.raise_for_status()
-        events = r.json()
-        if isinstance(events, list):
-            for ev in events:
-                for m in ev.get("markets", []):
-                    markets.append(m)
-        elif isinstance(events, dict):
-            for m in events.get("markets", []):
-                markets.append(m)
-    except Exception as e:
-        print(f"[market_discovery] Polymarket events endpoint: {e}")
-
-    # Fallback: generic markets search filtered by WC tag/keyword
-    if not markets:
+    events: list[dict] = []
+    offset = 0
+    while True:
         try:
             r = requests.get(
-                _POLY_MARKETS_URL,
-                params={"active": "true", "closed": "false", "limit": limit,
-                        "tag_slug": "world-cup"},
+                _POLY_EVENTS_URL,
+                params={
+                    "series_slug": "soccer-fifwc",
+                    "active": "true",
+                    "closed": "false",
+                    "limit": 100,
+                    "offset": offset,
+                },
                 timeout=20,
             )
             r.raise_for_status()
-            data = r.json()
-            markets = data if isinstance(data, list) else data.get("markets", [])
+            page = r.json()
         except Exception as e:
-            print(f"[market_discovery] Polymarket markets fallback: {e}")
+            print(f"[market_discovery] Polymarket events fetch: {e}")
+            break
 
-    _cache_set("poly_wc_markets", markets)
-    return markets
+        if not isinstance(page, list):
+            break
+        for ev in page:
+            slug  = ev.get("slug", "") or ""
+            title = ev.get("title", "") or ""
+            if not slug.startswith("fifwc"):
+                continue
+            # Keep only full-time W/D/W events
+            if any(kw in title for kw in ("Halftime", "More Markets", "Spread", "Total")):
+                continue
+            if not any(m.get("slug", "").endswith("-draw") for m in ev.get("markets", [])):
+                continue
+            events.append(ev)
+
+        if len(page) < 100:
+            break
+        offset += 100
+
+    _cache_set("poly_wc_events", events)
+    return events
 
 
 def find_polymarket_match(
@@ -207,47 +215,82 @@ def find_polymarket_match(
     away: str,
     kickoff_utc: str,
 ) -> dict | None:
-    """Find the Polymarket per-match market for a specific fixture.
+    """Find the Polymarket per-match 3-way market for a specific fixture.
 
-    Returns a dict with keys: market_id, question, outcomes, prices, end_date_iso
-    suitable for polling, or None if not yet listed.
+    Searches the soccer-fifwc event series for an event whose title contains
+    both team names, then combines the three binary markets (home-win / draw /
+    away-win) into a single result dict with:
+        outcomes = [home, "Draw", away]
+        prices   = [home_win_price, draw_price, away_win_price]
+
+    This format is directly consumable by _parse_match_market_probs() in the
+    job scripts without any further changes to that function.
+
+    Returns None if no live event is found for the fixture.
     """
     key = f"poly_match_{_norm(home)}_{_norm(away)}_{kickoff_utc[:10]}"
     cached = _cache_get(key)
     if cached is not None:
         return cached if cached else None
 
-    markets = _fetch_polymarket_wc_markets()
-    for m in markets:
-        title = str(m.get("question") or m.get("title") or "")
-        if not _teams_match(title, home, away):
+    home_words = {w for w in home.lower().split() if len(w) > 2}
+    away_words = {w for w in away.lower().split() if len(w) > 2}
+
+    for ev in _fetch_polymarket_wc_events():
+        ev_title = ev.get("title", "") or ""
+        # Match on event title e.g. "Mexico vs. South Africa" — contains both teams
+        if not _teams_match(ev_title, home, away):
             continue
-        end_date = m.get("endDate") or m.get("end_date") or m.get("endDateIso")
+        end_date = ev.get("endDate") or ev.get("startDate")
         if not _kickoff_close_enough(end_date, kickoff_utc):
             continue
 
-        # Parse outcomes and prices
-        try:
-            import json as _json
-            outcomes = _json.loads(m.get("outcomes", "[]"))
-            prices = [float(p) for p in _json.loads(m.get("outcomePrices", "[]"))]
-        except Exception:
-            outcomes, prices = [], []
+        # Extract the Yes price from each of the 3 binary markets
+        home_price = draw_price = away_price = None
+        for m in ev.get("markets", []):
+            mslug    = m.get("slug", "") or ""
+            question = (m.get("question", "") or "").lower()
+            try:
+                import json as _json
+                raw_prices = [float(p) for p in _json.loads(m.get("outcomePrices", "[]"))]
+                yes_price  = raw_prices[0] if raw_prices else None
+            except Exception:
+                yes_price = None
+            if yes_price is None:
+                continue
+
+            if mslug.endswith("-draw") or "draw" in question:
+                draw_price = yes_price
+            elif any(w in question for w in home_words):
+                home_price = yes_price
+            elif any(w in question for w in away_words):
+                away_price = yes_price
+
+        # Fall back: infer any single missing leg from the ~1 sum constraint
+        if home_price is None and draw_price is not None and away_price is not None:
+            home_price = max(0.0, 1.0 - draw_price - away_price)
+        if away_price is None and draw_price is not None and home_price is not None:
+            away_price = max(0.0, 1.0 - draw_price - home_price)
+        if draw_price is None and home_price is not None and away_price is not None:
+            draw_price = max(0.0, 1.0 - home_price - away_price)
+
+        if home_price is None or away_price is None:
+            continue  # couldn't parse enough prices
 
         result = {
-            "market_id": m.get("id") or m.get("conditionId", ""),
-            "question": title,
-            "outcomes": outcomes,
-            "prices": prices,
-            "end_date": end_date,
-            "active": m.get("active", True),
-            "closed": m.get("closed", False),
-            "platform": "polymarket",
+            "market_id": ev.get("slug", ""),
+            "question":  ev_title,
+            "outcomes":  [home, "Draw", away],
+            "prices":    [home_price, draw_price or 0.0, away_price],
+            "end_date":  end_date,
+            "active":    ev.get("active", True),
+            "closed":    ev.get("closed", False),
+            "platform":  "polymarket",
         }
         _cache_set(key, result)
         return result
 
-    _cache_set(key, {})  # cache miss so we don't hammer the API
+    _cache_set(key, {})
     return None
 
 
