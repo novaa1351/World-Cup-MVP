@@ -35,7 +35,12 @@ st.set_page_config(page_title="World Cup Model vs Market Dashboard", layout="wid
 @st.cache_data(show_spinner="Loading match history + computing Elo...")
 def load_elo(reversion: float, use_tournament_k: bool) -> dict[str, float]:
     matches = download_results()
-    return compute_elo(matches, reversion=reversion, use_tournament_k=use_tournament_k)
+    current_wc = matches[
+        (matches["date"] >= "2026-06-11") & (matches["date"] <= "2026-07-19")
+        & (matches["tournament"] == "FIFA World Cup")
+    ]
+    return compute_elo(matches, reversion=reversion, use_tournament_k=use_tournament_k,
+                       confed_offset=True, goal_diff_form=True, current_wc_matches=current_wc)
 
 
 @st.cache_data(show_spinner="Fetching prediction markets...")

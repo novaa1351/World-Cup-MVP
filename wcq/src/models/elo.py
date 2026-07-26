@@ -85,6 +85,8 @@ def compute_elo(
     current_wc_boost: float = 1.0,
     current_wc_year: int = 2026,
     confed_offset: bool = False,
+    goal_diff_form: bool = False,
+    current_wc_matches: "pd.DataFrame | None" = None,
 ) -> "dict[str, float] | tuple[dict[str, float], list]":
     """Replay every match in chronological order and return final Elo ratings.
 
@@ -180,6 +182,24 @@ def compute_elo(
             conf = CONFEDERATION.get(team)
             if conf:
                 ratings_dict[team] += offsets.get(conf, 0.0)
+
+    if goal_diff_form and current_wc_matches is not None:
+        from src.models.tournament_form import tournament_goal_diff_so_far, fit_goal_diff_weight
+        prep_rows = []
+        for row in current_wc_matches.itertuples(index=False):
+            gd = tournament_goal_diff_so_far(current_wc_matches, row.date)
+            prep_rows.append({
+                "home": row.home_team, "away": row.away_team,
+                "home_score": int(row.home_score), "away_score": int(row.away_score),
+                "neutral": bool(row.neutral),
+                "gd_home": gd.get(row.home_team, 0), "gd_away": gd.get(row.away_team, 0),
+            })
+        if prep_rows:
+            weight = fit_goal_diff_weight(prep_rows, ratings_dict, confed_adjust={})
+            final_gd = tournament_goal_diff_so_far(current_wc_matches, pd.Timestamp("2099-01-01"))
+            for team, gd in final_gd.items():
+                if team in ratings_dict:
+                    ratings_dict[team] += weight * gd
 
     if return_history:
         return ratings_dict, history
