@@ -80,6 +80,13 @@ def compute_elo(
     reversion: float = config.ELO_MEAN_REVERSION,
     use_tournament_k: bool = True,
     return_history: bool = False,
+    recent_weight: float = 1.0,
+    recent_days: int = 365,
+    current_wc_boost: float = 1.0,
+    current_wc_year: int = 2026,
+    confed_offset: bool = False,
+    goal_diff_form: bool = False,
+    current_wc_matches: "pd.DataFrame | None" = None,
 ) -> "dict[str, float] | tuple[dict[str, float], list]":
     """Replay every match in chronological order and return final Elo ratings.
 
@@ -93,6 +100,27 @@ def compute_elo(
                           (0 = off, 0.2 = 20 % pull per year — FiveThirtyEight
                           uses 0.33 for clubs).
         use_tournament_k: Apply tournament tier K-scaling (eloratings.net).
+        recent_weight:    Multiplier applied to matches within `recent_days`
+                          of the dataset's most recent match (1.0 = off,
+                          no extra weighting; e.g. 1.5 = 50% more weight).
+        recent_days:      Size of the "recent" window in days (default 365,
+                          i.e. the last 12 months).
+        current_wc_boost: Extra multiplier applied specifically to matches from
+                          `current_wc_year`'s World Cup, on top of the existing
+                          tier boost (1.0 = off). These are the only matches
+                          that directly connect otherwise-disconnected
+                          confederation rating pools, so they carry unusually
+                          strong signal about cross-confederation strength.
+        current_wc_year:  Year identifying "the current World Cup" (default 2026).
+        confed_offset:    If True, fit and apply per-confederation Elo offsets
+                          (see confederations.py) to correct for cross-
+                          confederation rating bias (e.g. CONCACAF teams
+                          historically overrated relative to UEFA/CONMEBOL).
+                          Fit fresh from `matches` each call — no lookahead
+                          bias, since it only ever sees the same data Elo
+                          itself is trained on. Validated via backtest across
+                          all 6 WCs (2002-2022): improves Brier score and hit
+                          rate in every year tested. Default off.
         return_history:   If True, also return a list of
                           (elo_diff_before_match, home_goals, away_goals)
                           for every match in chronological order. Used by
@@ -104,13 +132,14 @@ def compute_elo(
     """
     sorted_m = matches.sort_values("date").reset_index(drop=True)
     ratings: dict[str, float] = defaultdict(lambda: base)
-    history: list[tuple[float, int, int]] = []  # populated only when requested
+    history: list[tuple[float, int, int]] = []
     last_year: int | None = None
+
+    recent_cutoff = sorted_m["date"].max() - pd.Timedelta(days=recent_days)
 
     for row in sorted_m.itertuples(index=False):
         cur_year: int = row.date.year
 
-        # Mean-reversion at each calendar-year boundary
         if reversion > 0 and last_year is not None and cur_year > last_year:
             for team in list(ratings.keys()):
                 ratings[team] += reversion * (base - ratings[team])
@@ -119,13 +148,18 @@ def compute_elo(
         ra: float = ratings[row.home_team]
         rb: float = ratings[row.away_team]
         adv: float = 0.0 if row.neutral else home_adv
-        elo_diff: float = (ra + adv) - rb  # positive = home team favoured
+        elo_diff: float = (ra + adv) - rb
 
         if return_history:
             history.append((elo_diff, int(row.home_score), int(row.away_score)))
 
-        # K-factor for this match
         k_eff = tournament_k(str(row.tournament), k) if use_tournament_k else k
+
+        if row.date >= recent_cutoff:
+            k_eff *= recent_weight
+
+        if cur_year == current_wc_year and _WC_RE.search(str(row.tournament)):
+            k_eff *= current_wc_boost
 
         exp_home = expected_score(ra + adv, rb)
         if row.home_score > row.away_score:
@@ -140,6 +174,33 @@ def compute_elo(
         ratings[row.away_team] = rb - delta
 
     ratings_dict = dict(ratings)
+
+    if confed_offset:
+        from src.models.confederations import CONFEDERATION, fit_confederation_offsets
+        offsets = fit_confederation_offsets(matches, ratings_dict, CONFEDERATION)
+        for team in ratings_dict:
+            conf = CONFEDERATION.get(team)
+            if conf:
+                ratings_dict[team] += offsets.get(conf, 0.0)
+
+    if goal_diff_form and current_wc_matches is not None:
+        from src.models.tournament_form import tournament_goal_diff_so_far, fit_goal_diff_weight
+        prep_rows = []
+        for row in current_wc_matches.itertuples(index=False):
+            gd = tournament_goal_diff_so_far(current_wc_matches, row.date)
+            prep_rows.append({
+                "home": row.home_team, "away": row.away_team,
+                "home_score": int(row.home_score), "away_score": int(row.away_score),
+                "neutral": bool(row.neutral),
+                "gd_home": gd.get(row.home_team, 0), "gd_away": gd.get(row.away_team, 0),
+            })
+        if prep_rows:
+            weight = fit_goal_diff_weight(prep_rows, ratings_dict, confed_adjust={})
+            final_gd = tournament_goal_diff_so_far(current_wc_matches, pd.Timestamp("2099-01-01"))
+            for team, gd in final_gd.items():
+                if team in ratings_dict:
+                    ratings_dict[team] += weight * gd
+
     if return_history:
         return ratings_dict, history
     return ratings_dict

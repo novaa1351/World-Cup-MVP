@@ -137,6 +137,173 @@ def build_wc_backtest(
 
     return pd.DataFrame(rows)
 
+def build_wc_backtest_with_offset(
+    year: int,
+    all_matches: pd.DataFrame,
+    elo_reversion: float = config.ELO_MEAN_REVERSION,
+    use_tournament_k: bool = True,
+    draw_base: float | None = None,
+    scale: float | None = None,
+    offset_min_year: int | None = None,
+) -> pd.DataFrame:
+    """Same as build_wc_backtest, but applies fitted confederation offsets.
+
+    Offsets are fit using ONLY pre-cutoff data (same matches Elo itself is
+    trained on) to avoid lookahead bias — this is a fair, apples-to-apples
+    comparison against build_wc_backtest().
+
+    Args:
+        offset_min_year: passed through to fit_confederation_offsets' min_year.
+                         None = fit on all available pre-cutoff history.
+    """
+    from src.models.confederations import CONFEDERATION, fit_confederation_offsets
+
+    if year not in WC_CUTOFFS:
+        raise ValueError(f"year must be one of {list(WC_CUTOFFS)}")
+
+    start, end = WC_CUTOFFS[year]
+    cutoff = pd.Timestamp(start)
+
+    train = all_matches[all_matches["date"] < cutoff]
+    elo = compute_elo(train, reversion=elo_reversion, use_tournament_k=use_tournament_k)
+    base = config.ELO_BASE
+
+    # Fit offsets using ONLY pre-cutoff data — no lookahead
+    offsets = fit_confederation_offsets(train, elo, CONFEDERATION, min_year=offset_min_year)
+
+    wc = all_matches[
+        (all_matches["date"] >= cutoff)
+        & (all_matches["date"] <= end)
+        & (all_matches["tournament"] == "FIFA World Cup")
+    ].copy()
+
+    if wc.empty:
+        raise RuntimeError(f"No FIFA World Cup matches found for {year}.")
+
+    rows = []
+    for row in wc.itertuples(index=False):
+        conf_home = CONFEDERATION.get(row.home_team)
+        conf_away = CONFEDERATION.get(row.away_team)
+        off_home = offsets.get(conf_home, 0.0) if conf_home else 0.0
+        off_away = offsets.get(conf_away, 0.0) if conf_away else 0.0
+
+        r_home = elo.get(row.home_team, base) + off_home
+        r_away = elo.get(row.away_team, base) + off_away
+
+        probs = match_probs(r_home, r_away, neutral=bool(row.neutral),
+                            draw_base=draw_base, scale=scale)
+        baseline = expected_score(r_home, r_away)
+
+        actual_home = int(row.home_score)
+        actual_away = int(row.away_score)
+
+        outcomes = {
+            "home_win": (probs["home"], 1 if actual_home > actual_away else 0),
+            "draw":     (probs["draw"], 1 if actual_home == actual_away else 0),
+            "away_win": (probs["away"], 1 if actual_home < actual_away else 0),
+        }
+        for label, (mp, oc) in outcomes.items():
+            rows.append({
+                "date":         row.date,
+                "home":         row.home_team,
+                "away":         row.away_team,
+                "outcome_label": label,
+                "model_prob":   mp,
+                "market_prob":  1 / 3,
+                "outcome":      oc,
+                "home_score":   actual_home,
+                "away_score":   actual_away,
+                "elo_home":     r_home,
+                "elo_away":     r_away,
+                "baseline_prob": baseline if label == "home_win" else (1 - baseline) / 2,
+            })
+
+    return pd.DataFrame(rows)
+
+def build_wc_backtest_full(
+    year: int,
+    all_matches: pd.DataFrame,
+    elo_reversion: float = config.ELO_MEAN_REVERSION,
+    use_tournament_k: bool = True,
+    draw_base: float | None = None,
+    scale: float | None = None,
+) -> pd.DataFrame:
+    """Same as build_wc_backtest, but applies BOTH confederation offset AND
+    in-tournament goal-difference form. Both are fit with no lookahead:
+    confederation offset from pre-cutoff history, goal_diff_weight from this
+    tournament's own matches (using only goals scored strictly before each
+    match being predicted).
+    """
+    from src.models.confederations import CONFEDERATION, fit_confederation_offsets
+    from src.models.tournament_form import tournament_goal_diff_so_far, fit_goal_diff_weight
+
+    if year not in WC_CUTOFFS:
+        raise ValueError(f"year must be one of {list(WC_CUTOFFS)}")
+
+    start, end = WC_CUTOFFS[year]
+    cutoff = pd.Timestamp(start)
+
+    train = all_matches[all_matches["date"] < cutoff]
+    elo = compute_elo(train, reversion=elo_reversion, use_tournament_k=use_tournament_k)
+    base = config.ELO_BASE
+
+    offsets = fit_confederation_offsets(train, elo, CONFEDERATION)
+
+    wc = all_matches[
+        (all_matches["date"] >= cutoff)
+        & (all_matches["date"] <= end)
+        & (all_matches["tournament"] == "FIFA World Cup")
+    ].copy().sort_values("date").reset_index(drop=True)
+
+    if wc.empty:
+        raise RuntimeError(f"No FIFA World Cup matches found for {year}.")
+
+    # First pass: build (home, away, scores, goal-diff-so-far) for every match,
+    # so we can fit goal_diff_weight against the whole tournament at once.
+    prep_rows = []
+    for row in wc.itertuples(index=False):
+        gd = tournament_goal_diff_so_far(wc, row.date)
+        prep_rows.append({
+            "home": row.home_team, "away": row.away_team,
+            "home_score": int(row.home_score), "away_score": int(row.away_score),
+            "neutral": bool(row.neutral),
+            "gd_home": gd.get(row.home_team, 0),
+            "gd_away": gd.get(row.away_team, 0),
+        })
+
+    confed_adjust = {}
+    for team in elo:
+        conf = CONFEDERATION.get(team)
+        if conf:
+            confed_adjust[team] = offsets.get(conf, 0.0)
+
+    weight = fit_goal_diff_weight(prep_rows, elo, confed_adjust)
+
+    # Second pass: build final backtest rows using fitted weight
+    rows = []
+    for m in prep_rows:
+        r_home = elo.get(m["home"], base) + confed_adjust.get(m["home"], 0.0) + weight * m["gd_home"]
+        r_away = elo.get(m["away"], base) + confed_adjust.get(m["away"], 0.0) + weight * m["gd_away"]
+
+        probs = match_probs(r_home, r_away, neutral=m["neutral"],
+                            draw_base=draw_base, scale=scale)
+        baseline = expected_score(r_home, r_away)
+
+        outcomes = {
+            "home_win": (probs["home"], 1 if m["home_score"] > m["away_score"] else 0),
+            "draw":     (probs["draw"], 1 if m["home_score"] == m["away_score"] else 0),
+            "away_win": (probs["away"], 1 if m["home_score"] < m["away_score"] else 0),
+        }
+        for label, (mp, oc) in outcomes.items():
+            rows.append({
+                "date": None, "home": m["home"], "away": m["away"],
+                "outcome_label": label, "model_prob": mp, "market_prob": 1 / 3,
+                "outcome": oc, "home_score": m["home_score"], "away_score": m["away_score"],
+                "elo_home": r_home, "elo_away": r_away,
+                "baseline_prob": baseline if label == "home_win" else (1 - baseline) / 2,
+            })
+
+    return pd.DataFrame(rows)
 
 def run_backtest(
     df: pd.DataFrame,

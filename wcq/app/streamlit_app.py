@@ -35,7 +35,12 @@ st.set_page_config(page_title="World Cup Model vs Market Dashboard", layout="wid
 @st.cache_data(show_spinner="Loading match history + computing Elo...")
 def load_elo(reversion: float, use_tournament_k: bool) -> dict[str, float]:
     matches = download_results()
-    return compute_elo(matches, reversion=reversion, use_tournament_k=use_tournament_k)
+    current_wc = matches[
+        (matches["date"] >= "2026-06-11") & (matches["date"] <= "2026-07-19")
+        & (matches["tournament"] == "FIFA World Cup")
+    ]
+    return compute_elo(matches, reversion=reversion, use_tournament_k=use_tournament_k,
+                       confed_offset=True, goal_diff_form=True, current_wc_matches=current_wc)
 
 
 @st.cache_data(show_spinner="Fetching prediction markets...")
@@ -115,6 +120,134 @@ def build_bracket(
 
     champion = rounds_data["Final"][0][4]
     return rounds_data, champion
+
+def build_real_bracket() -> tuple[dict, str, dict]:
+    """Real 2026 R32-through-Final bracket (actual draw), model's OWN picks
+    propagate through the TRUE bracket tree — no mid-bracket correction.
+    Reordered so consecutive match-pairs correctly feed forward, matching
+    bracket_chart()'s layout assumption (derived from the real tree, not
+    chronological order).
+    """
+    import pandas as pd
+    from src.models.match_model import win_prob_knockout
+    from src.models.confederations import CONFEDERATION, fit_confederation_offsets
+    from src.models.tournament_form import tournament_goal_diff_so_far, fit_goal_diff_weight
+    from src.models.tournament import _FIFA_TO_HIST, simulate_tournament
+
+    matches = download_results()
+    cutoff = pd.Timestamp("2026-06-11")
+    end = pd.Timestamp("2026-07-19")
+    train = matches[matches["date"] < cutoff]
+
+    ratings = compute_elo(train)
+    offsets = fit_confederation_offsets(train, ratings, CONFEDERATION)
+
+    wc = matches[
+        (matches["date"] >= cutoff) & (matches["date"] <= end)
+        & (matches["tournament"] == "FIFA World Cup")
+    ].sort_values("date").reset_index(drop=True)
+    all_teams = set(wc["home_team"]) | set(wc["away_team"])
+    confed_adjust = {t: offsets.get(CONFEDERATION.get(t), 0.0) for t in all_teams}
+    base = config.ELO_BASE
+
+    def elo_lookup(team):
+        hist_name = _FIFA_TO_HIST.get(team, team)
+        return ratings.get(hist_name, base) + confed_adjust.get(team, 0.0)
+
+    group_stage = wc.iloc[:72]
+    knockout = wc.iloc[72:].reset_index(drop=True)
+
+    r32_matches = knockout.iloc[0:16]
+    r16_matches = knockout.iloc[16:24]
+    qf_matches = knockout.iloc[24:28]
+    sf_matches = knockout.iloc[28:30]
+    final_match = knockout.iloc[31:32]
+
+    prep_rows = []
+    for row in group_stage.itertuples(index=False):
+        gd = tournament_goal_diff_so_far(group_stage, row.date)
+        prep_rows.append({
+            "home": row.home_team, "away": row.away_team,
+            "home_score": int(row.home_score), "away_score": int(row.away_score),
+            "neutral": bool(row.neutral),
+            "gd_home": gd.get(row.home_team, 0), "gd_away": gd.get(row.away_team, 0),
+        })
+    weight = fit_goal_diff_weight(
+        prep_rows, {t: elo_lookup(t) for t in all_teams}, confed_adjust={})
+    final_group_gd = tournament_goal_diff_so_far(group_stage, pd.Timestamp("2026-12-31"))
+
+    def rating(team):
+        return elo_lookup(team) + weight * final_group_gd.get(team, 0)
+
+    def pick_winner(a, b):
+        p_a = win_prob_knockout(rating(a), rating(b))
+        return (a, b, p_a, 1 - p_a, a if p_a >= 0.5 else b)
+
+    def team_to_slot_map(round_df):
+        mapping = {}
+        for idx, row in enumerate(round_df.itertuples(index=False)):
+            mapping[row.home_team] = idx
+            mapping[row.away_team] = idx
+        return mapping
+
+    def build_structure(prev_slot_map, next_round_df):
+        return [(prev_slot_map[row.home_team], prev_slot_map[row.away_team])
+                for row in next_round_df.itertuples(index=False)]
+
+    r32_slot = team_to_slot_map(r32_matches)
+    r16_structure = build_structure(r32_slot, r16_matches)
+    r16_slot = team_to_slot_map(r16_matches)
+    qf_structure = build_structure(r16_slot, qf_matches)
+    qf_slot = team_to_slot_map(qf_matches)
+    sf_structure = build_structure(qf_slot, sf_matches)
+    sf_slot = team_to_slot_map(sf_matches)
+    final_structure = build_structure(sf_slot, final_match)
+
+    structures = {"R16": r16_structure, "QF": qf_structure, "SF": sf_structure, "Final": final_structure}
+
+    r32_list = [pick_winner(row.home_team, row.away_team) for row in r32_matches.itertuples(index=False)]
+
+    def propagate(struct, prev_list):
+        return [pick_winner(prev_list[i][4], prev_list[j][4]) for (i, j) in struct]
+
+    r16_list = propagate(r16_structure, r32_list)
+    qf_list = propagate(qf_structure, r16_list)
+    sf_list = propagate(sf_structure, qf_list)
+    final_list = propagate(final_structure, sf_list)
+
+    raw_rounds = {"R32": r32_list, "R16": r16_list, "QF": qf_list, "SF": sf_list, "Final": final_list}
+    raw_dfs = {"R32": r32_matches, "R16": r16_matches, "QF": qf_matches, "SF": sf_matches, "Final": final_match}
+
+    round_names = ["R32", "R16", "QF", "SF", "Final"]
+    order = {"Final": [0]}
+    for r in range(len(round_names) - 1, 0, -1):
+        cur, prev = round_names[r], round_names[r - 1]
+        prev_order = []
+        for idx in order[cur]:
+            pi, pj = structures[cur][idx]
+            prev_order.append(pi)
+            prev_order.append(pj)
+        order[prev] = prev_order
+
+    rounds_data = {rn: [raw_rounds[rn][idx] for idx in order[rn]] for rn in round_names}
+    champion_team = final_list[0][4]
+
+    correct, total = 0, 0
+    for rn in round_names:
+        for k, row in enumerate(raw_dfs[rn].itertuples(index=False)):
+            actual = row.home_team if row.home_score > row.away_score else row.away_team
+            pick = raw_rounds[rn][k][4]
+            total += 1
+            if pick == actual:
+                correct += 1
+
+    adjusted_ratings = dict(ratings)
+    for team in all_teams:
+        hist_name = _FIFA_TO_HIST.get(team, team)
+        adjusted_ratings[hist_name] = elo_lookup(team)
+    mc_survival = simulate_tournament(adjusted_ratings, n_sims=3000, seed=42)
+
+    return rounds_data, champion_team, mc_survival, f"{correct}/{total} ({correct/total:.0%})"
 
 
 @st.cache_data(show_spinner="Running 2026 forward simulation…")
@@ -985,6 +1118,7 @@ World Cup results carry more information per game than qualifiers, thus weightin
 them more heavily in Elo updates is empirically justified.
 """)
 
+
     with col_table:
         summary_rows = []
         for yr in sorted(all_bt):
@@ -1019,14 +1153,14 @@ them more heavily in Elo updates is empirically justified.
     # ── Section 3: knockout bracket ───────────────────────────────────────────
     st.markdown("### Expected 2026 World Cup knockout bracket")
     st.caption(
-        "Teams are seeded by Elo rating within each group (highest Elo = expected group winner, "
-        "second = runner-up, best 8 third-placed by Elo fill the remaining R32 slots). "
-        "Each match shows the two expected opponents with their head-to-head win probability "
-        "from the draw-adjusted model."
+        "REAL 2026 R32 draw. Model's own picks propagate through the true bracket "
+        "tree with no mid-bracket correction — trained on pre-tournament data only, "
+        "no lookahead. Box shading = model's champion probability (Monte Carlo)."
     )
 
-    rounds_data, champion_team = build_bracket(tuple(sorted(elo.items())), _db, _sc)
+    rounds_data, champion_team, mc_survival_real, accuracy = build_real_bracket()
     st.plotly_chart(
-        charts.bracket_chart(rounds_data, champion_team, mc_survival, dark_mode=_dark_mode),
+        charts.bracket_chart(rounds_data, champion_team, mc_survival_real, dark_mode=_dark_mode),
         use_container_width=True,
     )
+    st.metric("Knockout-stage accuracy (model's own picks, real bracket, no correction)", accuracy)  

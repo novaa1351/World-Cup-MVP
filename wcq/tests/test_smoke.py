@@ -36,6 +36,23 @@ def test_kelly_bounds():
     assert kelly_fraction(0.5, 0.5) == 0.0      # no edge -> no bet
     assert 0 <= kelly_fraction(0.6, 0.4) <= 0.25
 
+def test_forward_simulation_returns_valid_shape():
+    from app.streamlit_app import run_forward_simulation
+    from src.models.tournament import GROUPS_2026
+    import config
+
+    all_teams = [t for g in GROUPS_2026.values() for t in g]
+    elo = {team: config.ELO_BASE for team in all_teams}
+
+    results = run_forward_simulation(
+        tuple(sorted(elo.items())), 0.3131, 318.2, 5,
+    )
+
+    assert len(results) == 5
+    for r in results:
+        assert set(r.keys()) == {"R32", "R16", "QF", "SF", "champion"}
+        assert r["R32"] >= r["R16"] >= r["QF"] >= r["SF"]  # each round is a subset of the previous
+        assert r["champion"] in r["SF"]
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
