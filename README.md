@@ -25,7 +25,7 @@ The live 2026 score (0.181) landing slightly better than the six-tournament hist
 
 **What this project does not show:** whether the model beats the *market*. Live market-odds capture failed silently for the whole tournament, so every edge and ROI figure here is measured against a flat 1/3 baseline, not real prices. That is an honest null, and it is documented rather than papered over.
 
-📄 **[Read the full write-up](WRITEUP.md)** for the methodology, the ideas that failed, the bugs found in a post-tournament audit, and the limitations.
+A detailed write-up of the cross-confederation calibration work and the post-tournament audit lives in [Yousif's fork](https://github.com/yousae/World-Cup-MVP/blob/main/WRITEUP.md).
 
 ---
 
@@ -68,7 +68,7 @@ svi_surface.py (survival curves)           |
 
 - **Elo:** replayed over every international match from 1872 to present, 5% annual mean-reversion, 5-tier tournament K-weighting (World Cup finals K=60 down to friendlies K=20).
 - **Draw model:** `P(draw | Δelo) = draw_base × exp(-|Δelo| / scale)`, fit by maximum likelihood on ~21k competitive matches rather than hardcoded.
-- **Confederation offsets:** per-confederation Elo corrections fit by MLE on cross-confederation results, correcting a real bias where CONCACAF teams were overrated against UEFA and CONMEBOL opposition. See [WRITEUP.md](WRITEUP.md) sections 1 to 4.
+- **Confederation offsets:** per-confederation Elo corrections fit by MLE on cross-confederation results, correcting a real bias where CONCACAF teams were overrated against UEFA and CONMEBOL opposition.
 - **Monte Carlo:** 20,000 simulations of the 48-team bracket for round-by-round survival probabilities.
 
 **Methodology guarantees**
