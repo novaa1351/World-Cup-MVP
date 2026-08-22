@@ -94,8 +94,8 @@ def _get_elo_ratings() -> dict[str, float]:
         return _elo_cache[0]
     try:
         from src.data.historical import load_results
-        from src.models.elo import compute_elo
-        ratings = compute_elo(load_results())
+        from src.models.elo import production_elo
+        ratings = production_elo(load_results())
         _elo_cache = (ratings, now)
         log.info("Elo ratings refreshed (%d teams)", len(ratings))
         return ratings
@@ -383,9 +383,9 @@ def _get_mc_survival_champion(team: str) -> float | None:
         return _mc_survival_cache.get(team)
     try:
         from src.data.historical import load_results
-        from src.models.elo import compute_elo
+        from src.models.elo import production_elo
         from src.models.tournament import simulate_tournament
-        ratings = compute_elo(load_results())
+        ratings = production_elo(load_results())
         mc = simulate_tournament(ratings, n_sims=5000)
         _mc_survival_cache = {t: v.get("champion", 0.0) for t, v in mc.items()}
         return _mc_survival_cache.get(team)

@@ -206,6 +206,47 @@ def compute_elo(
     return ratings_dict
 
 
+def production_elo(
+    matches: pd.DataFrame,
+    reversion: float = config.ELO_MEAN_REVERSION,
+    use_tournament_k: bool = True,
+) -> dict[str, float]:
+    """Elo ratings under the one configuration this project has validated.
+
+    Every consumer that makes a real forecast (the Discord bot's pre-match
+    briefings and daily digest, the live poller, the dashboard) must go
+    through this function rather than calling compute_elo() directly.
+
+    Why this exists: compute_elo() defaults `confed_offset` and
+    `goal_diff_form` to False, so `compute_elo(load_results())` silently
+    returns PLAIN Elo. The bot called it that way and ran plain Elo live for
+    the entire 2026 tournament, while the dashboard passed the flags and ran
+    the corrected model. Both were described as "the model". On the 72 live
+    matches the corrections are worth about 0.033 of Brier score
+    (see run_live_baseline_comparison.py and WRITEUP.md section 16), so the
+    gap was not cosmetic. Centralising the configuration here means a caller
+    can no longer get the uncorrected model by accident, and
+    tests/test_no_lookahead.py fails the build if a production module goes
+    back to calling compute_elo() directly.
+
+    Backtests deliberately do NOT use this: they fit their own offsets from
+    pre-cutoff data per tournament, which is what keeps them walk-forward.
+    """
+    current_wc = matches[
+        (matches["date"] >= config.CURRENT_WC_START)
+        & (matches["date"] <= config.CURRENT_WC_END)
+        & (matches["tournament"] == "FIFA World Cup")
+    ]
+    return compute_elo(
+        matches,
+        reversion=reversion,
+        use_tournament_k=use_tournament_k,
+        confed_offset=True,
+        goal_diff_form=True,
+        current_wc_matches=current_wc if not current_wc.empty else None,
+    )
+
+
 def top_n(ratings: dict[str, float], n: int = 20) -> pd.DataFrame:
     s = pd.Series(ratings).sort_values(ascending=False).head(n)
     return s.rename("elo").rename_axis("team").reset_index()

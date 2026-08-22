@@ -39,10 +39,10 @@ def _now() -> datetime:
 
 def _get_model_data() -> tuple[dict, object, object]:
     from src.data.historical import load_results
-    from src.models.elo import compute_elo
+    from src.models.elo import production_elo
     from src.models.match_model import match_probs
     from src.models.tournament import _FIFA_TO_HIST
-    ratings = compute_elo(load_results())
+    ratings = production_elo(load_results())
     return ratings, match_probs, _FIFA_TO_HIST
 
 

@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 from src.data.historical import download_results, load_results
 from src.data.markets import get_all, winner_probs, kalshi_survival_probs, fetch_polymarket_matches
-from src.models.elo import compute_elo, top_n
+from src.models.elo import compute_elo, production_elo, top_n
 from src.models.match_model import draw_params_available, fit_draw_params, match_probs
 from src.models.tournament import simulate_tournament, survival_table, GROUPS_2026, MARKET_TO_FIFA, _FIFA_TO_HIST
 from src.models.svi_surface import SurvivalSurface
@@ -34,13 +34,11 @@ st.set_page_config(page_title="World Cup Model vs Market Dashboard", layout="wid
 
 @st.cache_data(show_spinner="Loading match history + computing Elo...")
 def load_elo(reversion: float, use_tournament_k: bool) -> dict[str, float]:
-    matches = download_results()
-    current_wc = matches[
-        (matches["date"] >= "2026-06-11") & (matches["date"] <= "2026-07-19")
-        & (matches["tournament"] == "FIFA World Cup")
-    ]
-    return compute_elo(matches, reversion=reversion, use_tournament_k=use_tournament_k,
-                       confed_offset=True, goal_diff_form=True, current_wc_matches=current_wc)
+    # Goes through production_elo() so the dashboard and the Discord bot are
+    # guaranteed to be running the same model. They were not, for the whole
+    # 2026 tournament: see src/models/elo.py's docstring and WRITEUP.md §16.
+    return production_elo(download_results(), reversion=reversion,
+                          use_tournament_k=use_tournament_k)
 
 
 @st.cache_data(show_spinner="Fetching prediction markets...")
@@ -1102,12 +1100,15 @@ indicating that the *relative ranking* of outcome probabilities is robust even
 when absolute calibration fluctuates in a 64-match sample.
 
 **3. Draw model: calibration matters**
-Maximum-likelihood estimation on 21,447 competitive matches (1990–present) yields
-`draw_base = 0.313` which is significantly higher than the conventional 0.28 assumption
-and is accompanied by a faster decay constant (`scale = 318` vs 400). Draws are structurally more
+Maximum-likelihood estimation on ~21.5k competitive matches (1990–present) yields
+`draw_base ≈ 0.313`, significantly higher than the conventional 0.28 assumption,
+with a faster decay constant (`scale ≈ 319` vs 400). Draws are structurally more
 likely at equal Elo strength than the literature assumes, but Elo differentiation
 compresses that advantage more quickly than a simple exponential with scale = 400
-would suggest.
+would suggest. Note this is a *finding from a calibration run*, not the setting
+behind the numbers on this page: that fit uses the full match history, so loading
+it by default would leak those tournaments' own results into the backtests scoring
+them. Unless you calibrate from the sidebar, the model runs on 0.28 / 400.
 
 **4. National-team mean-reversion converges slowly**
 The 5 % annual reversion rate that produces calibrated ratings here is 4–6× slower

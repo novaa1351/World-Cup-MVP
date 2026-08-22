@@ -32,8 +32,8 @@ from src.markets.edges import edge_table, flag_value
 
 def _get_elo_ratings() -> dict[str, float]:
     from src.data.historical import load_results
-    from src.models.elo import compute_elo
-    return compute_elo(load_results())
+    from src.models.elo import production_elo
+    return production_elo(load_results())
 
 
 def _market_probs_for_match(
